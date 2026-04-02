@@ -60,6 +60,18 @@ class TailscaleDashboardPage extends StatefulWidget {
   State<TailscaleDashboardPage> createState() => _TailscaleDashboardPageState();
 }
 
+class _SshStreamAttemptResult {
+  const _SshStreamAttemptResult({
+    required this.exitCode,
+    required this.stdoutText,
+    required this.stderrText,
+  });
+
+  final int exitCode;
+  final String stdoutText;
+  final String stderrText;
+}
+
 class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   static const List<String> _commonLinuxSshUsers = <String>[
     'opc',
@@ -85,6 +97,8 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       TextEditingController();
   final TextEditingController _remoteStdinCommandController =
       TextEditingController(text: 'python3 -');
+  final TextEditingController _windowsCleanupPatternController =
+      TextEditingController(text: 'scaleserve_stream');
   final TextEditingController _remoteCommandController =
       TextEditingController();
 
@@ -104,13 +118,16 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   bool _rememberAuthKey = false;
   bool _autoConnectOnLaunch = false;
   bool _setupEnableTailscaleSsh = true;
+  bool _autoKillWindowsPythonAfterStreamRun = true;
   bool _hasStoredKey = false;
+  bool _remoteStopRequested = false;
 
   String? _selectedRemoteDeviceDns;
   Map<String, RemoteDeviceProfile> _remoteProfilesByDns =
       <String, RemoteDeviceProfile>{};
   List<RemoteExecutionRecord> _remoteExecutionHistory =
       <RemoteExecutionRecord>[];
+  Process? _activeRemoteSshProcess;
 
   Timer? _refreshTimer;
 
@@ -424,7 +441,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     }
   }
 
-  String _linuxAuthorizedKeySetupCommand() {
+  String _posixAuthorizedKeySetupCommand() {
     if (_sshPublicKey.isEmpty) {
       return '';
     }
@@ -436,8 +453,74 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
         'printf \'%s\\n\' \'$escaped\' >> ~/.ssh/authorized_keys)';
   }
 
-  Future<void> _copyLinuxSshBootstrapCommand() async {
-    final command = _linuxAuthorizedKeySetupCommand();
+  String _windowsAuthorizedKeySetupCommand() {
+    if (_sshPublicKey.isEmpty) {
+      return '';
+    }
+
+    final escaped = _sshPublicKey.replaceAll("'", "''");
+    const scriptTemplate =
+        r"$ErrorActionPreference = 'Stop'; "
+        r"function Write-KeyFile([string]$path, [string]$line) { "
+        r"  New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null; "
+        r"  $lines = @(); "
+        r"  if (Test-Path $path) { "
+        r"    $lines = Get-Content -Path $path -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' } "
+        r"  }; "
+        r"  if ($lines -notcontains $line) { $lines += $line }; "
+        r"  $enc = New-Object System.Text.UTF8Encoding($false); "
+        r"  [System.IO.File]::WriteAllLines($path, $lines, $enc) "
+        r"}; "
+        r"$key = '__SCALESERVE_KEY__'; "
+        r"$userAuth = Join-Path (Join-Path $env:USERPROFILE '.ssh') 'authorized_keys'; "
+        r"Write-KeyFile $userAuth $key; "
+        r"& icacls (Split-Path $userAuth) /inheritance:r /grant ($env:USERNAME + ':(OI)(CI)F') /grant 'SYSTEM:F' | Out-Null; "
+        r"& icacls $userAuth /inheritance:r /grant ($env:USERNAME + ':F') /grant 'SYSTEM:F' | Out-Null; "
+        r"$adminAuth = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; "
+        r"try { "
+        r"  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); "
+        r"  if ($isAdmin) { "
+        r"    Write-KeyFile $adminAuth $key; "
+        r"    & icacls $adminAuth /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null "
+        r"  } "
+        r"} catch { }; "
+        r"if (Get-Service sshd -ErrorAction SilentlyContinue) { "
+        r"  try { "
+        r"    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue; "
+        r"    Start-Service sshd -ErrorAction SilentlyContinue; "
+        r"    Restart-Service sshd -ErrorAction SilentlyContinue "
+        r"  } catch { } "
+        r"}";
+
+    final script = scriptTemplate.replaceAll('__SCALESERVE_KEY__', escaped);
+    return 'powershell -NoProfile -NonInteractive -Command "$script"';
+  }
+
+  String _targetSshSetupCommandForPeer(TailscalePeer? peer) {
+    final os = (peer?.os ?? '').toLowerCase();
+    if (os.contains('windows')) {
+      return _windowsAuthorizedKeySetupCommand();
+    }
+    return _posixAuthorizedKeySetupCommand();
+  }
+
+  String _targetOsLabel(TailscalePeer? peer) {
+    final os = (peer?.os ?? '').toLowerCase();
+    if (os.contains('windows')) {
+      return 'Windows';
+    }
+    if (os.contains('mac')) {
+      return 'macOS';
+    }
+    if (os.contains('linux')) {
+      return 'Linux';
+    }
+    return 'target';
+  }
+
+  Future<void> _copyTargetSshBootstrapCommand() async {
+    final peer = _peerByDnsName(_selectedRemoteDeviceDns ?? '');
+    final command = _targetSshSetupCommandForPeer(peer);
     if (command.isEmpty) {
       setState(() {
         _infoMessage = 'Generate or load an SSH key first.';
@@ -447,7 +530,8 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     await _copyToClipboard(
       text: command,
-      successMessage: 'Copied Linux SSH bootstrap command.',
+      successMessage:
+          'Copied SSH setup command for ${_targetOsLabel(peer)} target.',
     );
   }
 
@@ -495,7 +579,14 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       return;
     }
 
-    final bootstrapCommand = _linuxAuthorizedKeySetupCommand();
+    final peer = _peerByDnsName(dnsName);
+    final bootstrapCommand = _targetSshSetupCommandForPeer(peer);
+    if (bootstrapCommand.isEmpty) {
+      setState(() {
+        _infoMessage = 'Generate or load your ScaleServe SSH key first.';
+      });
+      return;
+    }
     final args = <String>[
       '-o',
       'BatchMode=yes',
@@ -527,7 +618,8 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     setState(() {
       _runningRemoteCommand = true;
       _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
-      _infoMessage = 'Installing ScaleServe public key on $dnsName...';
+      _infoMessage =
+          'Installing ScaleServe public key on $dnsName (${_targetOsLabel(peer)})...';
     });
 
     try {
@@ -673,12 +765,14 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _activeRemoteSshProcess?.kill();
     _authKeyController.dispose();
     _remoteUserController.dispose();
     _remoteKeyPathController.dispose();
     _bootstrapKeyPathController.dispose();
     _localStreamFilePathController.dispose();
     _remoteStdinCommandController.dispose();
+    _windowsCleanupPatternController.dispose();
     _remoteCommandController.dispose();
     super.dispose();
   }
@@ -791,7 +885,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
   String _windowsJoinCommand() {
     final key = _effectiveAuthKeyForCommand();
-    return '& "C:\\Program Files\\Tailscale\\tailscale.exe" up --reset --ssh '
+    return '& "C:\\Program Files\\Tailscale\\tailscale.exe" up --reset '
         '--auth-key=$key --hostname=\$env:COMPUTERNAME';
   }
 
@@ -972,7 +1066,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       _detectingRemoteUser = false;
       _remoteLiveOutput = output.toString().trim();
       _infoMessage =
-          'Could not detect SSH user automatically. Run Linux SSH setup once '
+          'Could not detect SSH user automatically. Run SSH setup once '
           'on the target machine, then retry Test SSH Access.';
     });
   }
@@ -1026,12 +1120,15 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     setState(() {
       _runningRemoteCommand = true;
+      _remoteStopRequested = false;
       _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
       _infoMessage = 'Running remote command on $dnsName...';
     });
 
+    Process? process;
     try {
-      final process = await Process.start('ssh', sshArgs, runInShell: false);
+      process = await Process.start('ssh', sshArgs, runInShell: false);
+      _activeRemoteSshProcess = process;
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
 
@@ -1077,6 +1174,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       final stdoutText = stdoutBuffer.toString().trim();
       final stderrText = stderrBuffer.toString().trim();
+      final stoppedByUser = _remoteStopRequested;
       final success = exitCode == 0;
 
       final summary = StringBuffer()
@@ -1118,9 +1216,11 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       setState(() {
         _runningRemoteCommand = false;
         _remoteLiveOutput = summary.toString().trim();
-        _infoMessage = success
-            ? 'Remote command completed on $dnsName.'
-            : 'Remote command failed on $dnsName (exit $exitCode).';
+        _infoMessage = stoppedByUser
+            ? 'Remote command stopped by user.'
+            : (success
+                  ? 'Remote command completed on $dnsName.'
+                  : 'Remote command failed on $dnsName (exit $exitCode).');
       });
     } on ProcessException catch (error) {
       if (!mounted) {
@@ -1140,6 +1240,11 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
         _remoteLiveOutput += '\nERROR: $error';
         _infoMessage = 'Remote execution failed: $error';
       });
+    } finally {
+      if (identical(_activeRemoteSshProcess, process)) {
+        _activeRemoteSshProcess = null;
+      }
+      _remoteStopRequested = false;
     }
   }
 
@@ -1151,6 +1256,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     final remoteStdinCommand = _remoteStdinCommandController.text.trim().isEmpty
         ? 'python3 -'
         : _remoteStdinCommandController.text.trim();
+    final windowsCleanupPattern = _windowsCleanupPatternController.text.trim();
 
     if (dnsName == null || dnsName.isEmpty) {
       setState(() {
@@ -1173,6 +1279,9 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       return;
     }
 
+    final peer = _peerByDnsName(dnsName);
+    final isWindowsTarget = (peer?.os ?? '').toLowerCase().contains('windows');
+
     final localFile = File(localFilePath);
     final exists = await localFile.exists();
     if (!exists) {
@@ -1185,90 +1294,156 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     await _saveRemoteProfile(showMessage: false);
 
     final target = '$user@$dnsName';
-    final sshArgs = <String>[
+    final baseSshArgs = <String>[
       if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
       target,
-      remoteStdinCommand,
     ];
 
-    final safeCommand = StringBuffer('ssh ');
-    if (keyPath.isNotEmpty) {
-      safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
+    String safeCommandForDisplay(String remoteCommand) {
+      final safeCommand = StringBuffer('ssh ');
+      if (keyPath.isNotEmpty) {
+        safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
+      }
+      safeCommand.write('$target "$remoteCommand" < "$localFilePath"');
+      return safeCommand.toString();
     }
-    safeCommand.write('$target "$remoteStdinCommand" < "$localFilePath"');
+
+    final initialSafeCommand = safeCommandForDisplay(remoteStdinCommand);
 
     setState(() {
       _runningRemoteCommand = true;
-      _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
+      _remoteStopRequested = false;
+      _remoteLiveOutput = 'Command: $initialSafeCommand\n';
       _infoMessage = 'Streaming local file to $dnsName and running remotely...';
     });
 
     try {
-      final process = await Process.start('ssh', sshArgs, runInShell: false);
-      final stdoutBuffer = StringBuffer();
-      final stderrBuffer = StringBuffer();
+      final initialAttempt = await _runSshStreamCommandAttempt(
+        sshArgs: <String>[...baseSshArgs, remoteStdinCommand],
+        localFile: localFile,
+        stdoutPrefix: 'STDOUT: ',
+        stderrPrefix: 'STDERR: ',
+      );
 
-      final stdoutDone = Completer<void>();
-      final stderrDone = Completer<void>();
+      _SshStreamAttemptResult finalAttempt = initialAttempt;
+      _SshStreamAttemptResult? fallbackAttempt;
+      String? fallbackCommand;
 
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(
-            (line) {
-              stdoutBuffer.writeln(line);
-              if (mounted) {
-                setState(() {
-                  _remoteLiveOutput += 'STDOUT: $line\n';
-                });
-              }
-            },
-            onDone: () => stdoutDone.complete(),
-            onError: (_) => stdoutDone.complete(),
-            cancelOnError: false,
+      final shouldRetryWithTempFile =
+          (isWindowsTarget ||
+              _looksLikeWindowsRemoteOutput(
+                stdoutText: initialAttempt.stdoutText,
+                stderrText: initialAttempt.stderrText,
+              )) &&
+          !_remoteStopRequested &&
+          _isWindowsPythonStdinCommand(remoteStdinCommand) &&
+          _looksLikeWindowsPythonStdinSpawnFailure(
+            exitCode: initialAttempt.exitCode,
+            stdoutText: initialAttempt.stdoutText,
+            stderrText: initialAttempt.stderrText,
           );
 
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(
-            (line) {
-              stderrBuffer.writeln(line);
-              if (mounted) {
-                setState(() {
-                  _remoteLiveOutput += 'STDERR: $line\n';
-                });
-              }
-            },
-            onDone: () => stderrDone.complete(),
-            onError: (_) => stderrDone.complete(),
-            cancelOnError: false,
-          );
+      if (shouldRetryWithTempFile) {
+        fallbackCommand = _buildWindowsPythonStdinTempFileCommand(
+          remoteStdinCommand,
+        );
+      }
 
-      await process.stdin.addStream(localFile.openRead());
-      await process.stdin.close();
+      if (fallbackCommand != null && fallbackCommand.isNotEmpty) {
+        final retryCommand = fallbackCommand;
+        if (mounted) {
+          setState(() {
+            _remoteLiveOutput +=
+                '\n[Auto-retry] Detected Windows stdin execution issue with child processes.\n';
+            _remoteLiveOutput +=
+                'Command (retry): ${safeCommandForDisplay(retryCommand)}\n';
+          });
+        }
 
-      final exitCode = await process.exitCode;
-      await Future.wait([stdoutDone.future, stderrDone.future]);
+        final retryAttempt = await _runSshStreamCommandAttempt(
+          sshArgs: <String>[...baseSshArgs, retryCommand],
+          localFile: localFile,
+          stdoutPrefix: 'STDOUT (retry): ',
+          stderrPrefix: 'STDERR (retry): ',
+        );
+        fallbackAttempt = retryAttempt;
+        finalAttempt = retryAttempt;
+      }
 
-      final stdoutText = stdoutBuffer.toString().trim();
-      final stderrText = stderrBuffer.toString().trim();
+      final exitCode = finalAttempt.exitCode;
+      final stdoutText = finalAttempt.stdoutText;
+      final stderrText = finalAttempt.stderrText;
+      final stoppedByUser = _remoteStopRequested;
       final success = exitCode == 0;
+      final shouldAutoCleanup =
+          isWindowsTarget && _autoKillWindowsPythonAfterStreamRun;
+      final cleanupOutput = shouldAutoCleanup
+          ? (windowsCleanupPattern.isNotEmpty
+                ? await _cleanupWindowsPythonProcesses(
+                    dnsName: dnsName,
+                    user: user,
+                    keyPath: keyPath,
+                    commandLinePattern: windowsCleanupPattern,
+                  )
+                : 'Skipped auto-cleanup because cleanup pattern is empty.')
+          : '';
 
-      final summary = StringBuffer()
-        ..writeln('Command: ${safeCommand.toString()}')
+      final summary = StringBuffer()..writeln('Command: $initialSafeCommand');
+      if (fallbackAttempt != null) {
+        summary
+          ..writeln('Auto retry: enabled (Windows stdin -> temp file).')
+          ..writeln('Initial exit code: ${initialAttempt.exitCode}')
+          ..writeln(
+            'Retry command: ${safeCommandForDisplay(fallbackCommand!)}',
+          );
+      }
+      summary
         ..writeln('Exit code: $exitCode')
         ..writeln('');
-      if (stdoutText.isNotEmpty) {
+
+      if (fallbackAttempt == null) {
+        if (stdoutText.isNotEmpty) {
+          summary
+            ..writeln('STDOUT:')
+            ..writeln(stdoutText)
+            ..writeln('');
+        }
+        if (stderrText.isNotEmpty) {
+          summary
+            ..writeln('STDERR:')
+            ..writeln(stderrText);
+        }
+      } else {
+        summary.writeln('INITIAL ATTEMPT (STDIN):');
+        if (initialAttempt.stdoutText.isNotEmpty) {
+          summary
+            ..writeln('STDOUT:')
+            ..writeln(initialAttempt.stdoutText);
+        }
+        if (initialAttempt.stderrText.isNotEmpty) {
+          summary
+            ..writeln('STDERR:')
+            ..writeln(initialAttempt.stderrText);
+        }
         summary
-          ..writeln('STDOUT:')
-          ..writeln(stdoutText)
-          ..writeln('');
+          ..writeln('')
+          ..writeln('RETRY ATTEMPT (TEMP FILE):');
+        if (stdoutText.isNotEmpty) {
+          summary
+            ..writeln('STDOUT:')
+            ..writeln(stdoutText);
+        }
+        if (stderrText.isNotEmpty) {
+          summary
+            ..writeln('STDERR:')
+            ..writeln(stderrText);
+        }
       }
-      if (stderrText.isNotEmpty) {
+      if (cleanupOutput.isNotEmpty) {
         summary
-          ..writeln('STDERR:')
-          ..writeln(stderrText);
+          ..writeln('')
+          ..writeln('AUTO-CLEANUP:')
+          ..writeln(cleanupOutput);
       }
 
       _remoteExecutionHistory.insert(
@@ -1277,7 +1452,9 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
           startedAtIso: DateTime.now().toIso8601String(),
           deviceDnsName: dnsName,
           user: user,
-          command: 'stream:$localFilePath -> $remoteStdinCommand',
+          command:
+              'stream:$localFilePath -> $remoteStdinCommand'
+              '${fallbackAttempt != null ? ' [auto-retry: windows-temp-file]' : ''}',
           exitCode: exitCode,
           success: success,
         ),
@@ -1294,9 +1471,15 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       setState(() {
         _runningRemoteCommand = false;
         _remoteLiveOutput = summary.toString().trim();
-        _infoMessage = success
-            ? 'Remote stream run completed on $dnsName.'
-            : 'Remote stream run failed on $dnsName (exit $exitCode).';
+        _infoMessage = stoppedByUser
+            ? 'Remote stream run stopped by user.'
+            : (success
+                  ? (fallbackAttempt == null
+                        ? 'Remote stream run completed on $dnsName.'
+                        : 'Remote stream run completed on $dnsName after automatic retry.')
+                  : (fallbackAttempt == null
+                        ? 'Remote stream run failed on $dnsName (exit $exitCode).'
+                        : 'Remote stream run failed on $dnsName after automatic retry (exit $exitCode).'));
       });
     } on ProcessException catch (error) {
       if (!mounted) {
@@ -1316,6 +1499,240 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
         _remoteLiveOutput += '\nERROR: $error';
         _infoMessage = 'Remote stream execution failed: $error';
       });
+    } finally {
+      _activeRemoteSshProcess = null;
+      _remoteStopRequested = false;
+    }
+  }
+
+  Future<_SshStreamAttemptResult> _runSshStreamCommandAttempt({
+    required List<String> sshArgs,
+    required File localFile,
+    required String stdoutPrefix,
+    required String stderrPrefix,
+  }) async {
+    final process = await Process.start('ssh', sshArgs, runInShell: false);
+    _activeRemoteSshProcess = process;
+
+    final stdoutBuffer = StringBuffer();
+    final stderrBuffer = StringBuffer();
+    final stdoutDone = Completer<void>();
+    final stderrDone = Completer<void>();
+
+    process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(
+          (line) {
+            stdoutBuffer.writeln(line);
+            if (mounted) {
+              setState(() {
+                _remoteLiveOutput += '$stdoutPrefix$line\n';
+              });
+            }
+          },
+          onDone: () => stdoutDone.complete(),
+          onError: (_) => stdoutDone.complete(),
+          cancelOnError: false,
+        );
+
+    process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(
+          (line) {
+            stderrBuffer.writeln(line);
+            if (mounted) {
+              setState(() {
+                _remoteLiveOutput += '$stderrPrefix$line\n';
+              });
+            }
+          },
+          onDone: () => stderrDone.complete(),
+          onError: (_) => stderrDone.complete(),
+          cancelOnError: false,
+        );
+
+    try {
+      await process.stdin.addStream(localFile.openRead());
+      await process.stdin.close();
+
+      final exitCode = await process.exitCode;
+      await Future.wait([stdoutDone.future, stderrDone.future]);
+
+      return _SshStreamAttemptResult(
+        exitCode: exitCode,
+        stdoutText: stdoutBuffer.toString().trim(),
+        stderrText: stderrBuffer.toString().trim(),
+      );
+    } finally {
+      if (identical(_activeRemoteSshProcess, process)) {
+        _activeRemoteSshProcess = null;
+      }
+    }
+  }
+
+  bool _isWindowsPythonStdinCommand(String command) {
+    final stdinPattern = RegExp(
+      r'^(?:py|python(?:\d+(?:\.\d+)?)?)\s+-(?=\s|$)',
+      caseSensitive: false,
+    );
+    return stdinPattern.hasMatch(command.trim());
+  }
+
+  bool _looksLikeWindowsPythonStdinSpawnFailure({
+    required int exitCode,
+    required String stdoutText,
+    required String stderrText,
+  }) {
+    final combined = '$stdoutText\n$stderrText'.toLowerCase();
+    return combined.contains('multiprocessing.spawn') ||
+        combined.contains('__mp_main__') ||
+        combined.contains('<stdin>') ||
+        (combined.contains('invalid argument') && combined.contains('stdin'));
+  }
+
+  bool _looksLikeWindowsRemoteOutput({
+    required String stdoutText,
+    required String stderrText,
+  }) {
+    final combined = '$stdoutText\n$stderrText'.toLowerCase();
+    return combined.contains('platform: windows') ||
+        combined.contains(r'c:\') ||
+        combined.contains(r'\users\');
+  }
+
+  String? _buildWindowsPythonStdinTempFileCommand(String remoteStdinCommand) {
+    final trimmed = remoteStdinCommand.trim();
+    final stdinPattern = RegExp(
+      r'^(\s*(?:py|python(?:\d+(?:\.\d+)?)?)\s+)-(?=\s|$)',
+      caseSensitive: false,
+    );
+    if (!stdinPattern.hasMatch(trimmed)) {
+      return null;
+    }
+
+    final runFromTempCommand = trimmed.replaceFirstMapped(stdinPattern, (
+      match,
+    ) {
+      final prefix = match.group(1) ?? '';
+      return '$prefix"\$f"';
+    });
+
+    if (runFromTempCommand == trimmed) {
+      return null;
+    }
+
+    final escapedRunCommand = runFromTempCommand.replaceAll("'", "''");
+    return 'powershell -NoProfile -NonInteractive -Command '
+        '"\$f=Join-Path \$env:TEMP \'scaleserve_stream.py\'; '
+        '\$src=[Console]::In.ReadToEnd(); '
+        '[System.IO.File]::WriteAllText(\$f,\$src,[System.Text.UTF8Encoding]::new(\$false)); '
+        '\$runCmd=\'$escapedRunCommand\'; '
+        'Invoke-Expression \$runCmd; '
+        '\$ec=\$LASTEXITCODE; '
+        'Remove-Item \$f -Force -ErrorAction SilentlyContinue; '
+        'exit \$ec"';
+  }
+
+  Future<void> _stopRunningRemoteCommand() async {
+    final process = _activeRemoteSshProcess;
+    if (process == null) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active remote command to stop.';
+      });
+      return;
+    }
+
+    _remoteStopRequested = true;
+    var killed = false;
+    try {
+      killed = process.kill(ProcessSignal.sigterm);
+    } catch (_) {
+      // Fallback below.
+    }
+    if (!killed) {
+      try {
+        killed = process.kill();
+      } catch (_) {
+        // Best effort only.
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _remoteLiveOutput += '\n[Control] Stop requested by user.\n';
+      _infoMessage = killed
+          ? 'Stop requested. Waiting for remote process to exit...'
+          : 'Could not send stop signal to remote process.';
+    });
+  }
+
+  Future<String> _cleanupWindowsPythonProcesses({
+    required String dnsName,
+    required String user,
+    required String keyPath,
+    required String commandLinePattern,
+  }) async {
+    final escapedPattern = commandLinePattern.replaceAll("'", "''");
+    final cleanupCommand =
+        'powershell -NoProfile -NonInteractive -Command '
+        '"\$pattern = \'$escapedPattern\'; '
+        '\$targets = Get-CimInstance Win32_Process | Where-Object { '
+        '((\$_.Name -ieq \'python.exe\') -or (\$_.Name -ieq \'py.exe\')) '
+        '-and \$_.CommandLine -and (\$_.CommandLine -like (\'*\' + \$pattern + \'*\')) '
+        '}; '
+        'if (\$targets) { '
+        '\$targets | Select-Object ProcessId, Name, CommandLine | Format-Table -AutoSize; '
+        '\$targets | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }; '
+        'Write-Output (\'Killed matched processes: \' + (\$targets.Count)) '
+        '} else { '
+        'Write-Output (\'No matching python/py process found for pattern: \' + \$pattern) '
+        '}"';
+
+    final args = <String>[
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'StrictHostKeyChecking=accept-new',
+      if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
+      '$user@$dnsName',
+      cleanupCommand,
+    ];
+
+    try {
+      final result = await Process.run(
+        'ssh',
+        args,
+        runInShell: false,
+      ).timeout(const Duration(seconds: 20));
+      final stdout = (result.stdout ?? '').toString().trim();
+      final stderr = (result.stderr ?? '').toString().trim();
+      final out = StringBuffer()
+        ..writeln(
+          'Command: ssh $user@$dnsName "<auto-kill-python pattern=$commandLinePattern>"',
+        )
+        ..writeln('Exit code: ${result.exitCode}');
+      if (stdout.isNotEmpty) {
+        out
+          ..writeln('STDOUT:')
+          ..writeln(stdout);
+      }
+      if (stderr.isNotEmpty) {
+        out
+          ..writeln('STDERR:')
+          ..writeln(stderr);
+      }
+      return out.toString().trim();
+    } on TimeoutException {
+      return 'Timed out while trying to auto-kill python.exe on remote Windows target.';
+    } catch (error) {
+      return 'Auto-cleanup failed: $error';
     }
   }
 
@@ -1410,15 +1827,21 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     await _saveKeyPreferences();
 
+    final enableTailscaleSsh = _setupEnableTailscaleSsh && !Platform.isWindows;
+    final successMessage = enableTailscaleSsh
+        ? 'This laptop joined the tailnet and enabled Tailscale SSH.'
+        : (Platform.isWindows && _setupEnableTailscaleSsh
+              ? 'This Windows laptop joined the tailnet. '
+                    'Tailscale SSH server is not supported on Windows.'
+              : 'This laptop joined the tailnet.');
+
     await _runAction(
-      successMessage: _setupEnableTailscaleSsh
-          ? 'This laptop joined the tailnet and enabled Tailscale SSH.'
-          : 'This laptop joined the tailnet.',
+      successMessage: successMessage,
       action: () => widget.service.connect(
         authKey: authKey,
         reset: true,
         forceReauth: false,
-        enableSsh: _setupEnableTailscaleSsh,
+        enableSsh: enableTailscaleSsh,
       ),
     );
   }
@@ -1447,6 +1870,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     final stateColor = connected ? Colors.green : Colors.orange;
     final remoteCandidates = snapshot?.peers ?? const <TailscalePeer>[];
     final selectedRemoteDns = _selectedRemoteDeviceDns;
+    final tailscaleSshSupportedHere = !Platform.isWindows;
     final lastUpdatedText = _lastUpdated == null
         ? 'Not yet'
         : _lastUpdated!.toLocal().toIso8601String().replaceFirst('T', ' ');
@@ -1588,11 +2012,9 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                                   OutlinedButton.icon(
                                     onPressed: _sshPublicKey.isEmpty
                                         ? null
-                                        : _copyLinuxSshBootstrapCommand,
+                                        : _copyTargetSshBootstrapCommand,
                                     icon: const Icon(Icons.terminal),
-                                    label: const Text(
-                                      'Copy Linux SSH Setup Command',
-                                    ),
+                                    label: const Text('Copy SSH Setup Command'),
                                   ),
                                   OutlinedButton.icon(
                                     onPressed:
@@ -1631,8 +2053,10 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                               ),
                               const SizedBox(height: 8),
                               const Text(
-                                'Run the copied Linux SSH setup command on the target machine once. '
-                                'This installs your public key into authorized_keys. '
+                                'Run the copied SSH setup command on the target machine once. '
+                                'For Linux/macOS, it updates ~/.ssh/authorized_keys. '
+                                'For Windows, it updates authorized_keys with UTF-8 encoding, '
+                                'fixes ACLs, and refreshes sshd (with admin-file fallback). '
                                 'Or use Install Key On Remote if you can already SSH in with an existing key. '
                                 'Then use Detect SSH User to auto-fill the working login name.',
                               ),
@@ -1759,6 +2183,39 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                                   hintText: 'python3 -',
                                 ),
                               ),
+                              const SizedBox(height: 8),
+                              CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
+                                value: _autoKillWindowsPythonAfterStreamRun,
+                                onChanged:
+                                    _runningRemoteCommand ||
+                                        _detectingRemoteUser
+                                    ? null
+                                    : (value) {
+                                        setState(() {
+                                          _autoKillWindowsPythonAfterStreamRun =
+                                              value ?? true;
+                                        });
+                                      },
+                                title: const Text(
+                                  'Auto-clean matched python/py process after stream run on Windows',
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              TextField(
+                                controller: _windowsCleanupPatternController,
+                                enabled:
+                                    !_runningRemoteCommand &&
+                                    !_detectingRemoteUser,
+                                decoration: const InputDecoration(
+                                  border: OutlineInputBorder(),
+                                  labelText:
+                                      'Windows cleanup match (command line contains)',
+                                  hintText: 'scaleserve_stream',
+                                ),
+                              ),
                               const SizedBox(height: 10),
                               FilledButton.icon(
                                 onPressed:
@@ -1792,6 +2249,15 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                                   : () => _saveRemoteProfile(showMessage: true),
                               icon: const Icon(Icons.save),
                               label: const Text('Save Device Profile'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed:
+                                  _runningRemoteCommand &&
+                                      _activeRemoteSshProcess != null
+                                  ? _stopRunningRemoteCommand
+                                  : null,
+                              icon: const Icon(Icons.stop_circle_outlined),
+                              label: const Text('Stop Running Command'),
                             ),
                             TextButton(
                               onPressed:
@@ -1863,8 +2329,10 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                           'Use an auth key from a different tailnet to actually switch.',
                         ),
                         const SizedBox(height: 6),
-                        const Text(
-                          'On a new laptop, use the one-click setup button below to join this tailnet with SSH enabled.',
+                        Text(
+                          tailscaleSshSupportedHere
+                              ? 'On a new laptop, use the one-click setup button below to join this tailnet with SSH enabled.'
+                              : 'On Windows, one-click setup joins the tailnet, but skips --ssh because Tailscale SSH server is not supported on Windows.',
                         ),
                         const SizedBox(height: 12),
                         TextField(
@@ -1911,11 +2379,15 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                         CheckboxListTile(
                           contentPadding: EdgeInsets.zero,
                           controlAffinity: ListTileControlAffinity.leading,
-                          title: const Text(
-                            'Enable Tailscale SSH during one-click setup',
+                          title: Text(
+                            tailscaleSshSupportedHere
+                                ? 'Enable Tailscale SSH during one-click setup'
+                                : 'Enable Tailscale SSH during one-click setup (not supported on Windows)',
                           ),
-                          value: _setupEnableTailscaleSsh,
-                          onChanged: _isBusy
+                          value:
+                              tailscaleSshSupportedHere &&
+                              _setupEnableTailscaleSsh,
+                          onChanged: _isBusy || !tailscaleSshSupportedHere
                               ? null
                               : (value) {
                                   setState(() {

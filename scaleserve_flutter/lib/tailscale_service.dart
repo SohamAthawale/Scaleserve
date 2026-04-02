@@ -53,6 +53,7 @@ class TailscaleService {
     String? authKey,
     bool forceReauth = false,
     bool reset = false,
+    bool enableSsh = false,
   }) {
     final args = <String>['up'];
     if (forceReauth) {
@@ -60,6 +61,9 @@ class TailscaleService {
     }
     if (reset) {
       args.add('--reset');
+    }
+    if (enableSsh) {
+      args.add('--ssh');
     }
     if (authKey != null && authKey.isNotEmpty) {
       args.addAll(['--auth-key', authKey]);
@@ -73,6 +77,10 @@ class TailscaleService {
 
   Future<TailscaleCommandResult> disconnect() {
     return _runCommand(['down']);
+  }
+
+  Future<TailscaleCommandResult> pingPeer({required String target}) {
+    return _runCommand(['ping', target]);
   }
 
   Future<TailscaleCommandResult> _runCommand(List<String> args) async {
@@ -218,6 +226,7 @@ class TailscaleSnapshot {
           ),
           dnsName: _stringValue(peer['DNSName'], fallback: 'Unknown DNS'),
           ipAddress: ipList.isNotEmpty ? ipList.first.toString() : 'Unknown IP',
+          os: _stringValue(peer['OS'], fallback: 'unknown'),
           online: peer['Online'] == true,
         ),
       );
@@ -335,11 +344,17 @@ class TailscalePeer {
     required this.name,
     required this.dnsName,
     required this.ipAddress,
+    required this.os,
     required this.online,
   });
 
   final String name;
   final String dnsName;
   final String ipAddress;
+  final String os;
   final bool online;
+
+  String get normalizedDnsName => dnsName.endsWith('.')
+      ? dnsName.substring(0, dnsName.length - 1)
+      : dnsName;
 }

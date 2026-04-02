@@ -1,0 +1,7 @@
+#include "../../Flutter/Flutter-Debug.xcconfig"
+#include "Warnings.xcconfig"
+
+// Local development in iCloud-backed folders can inject xattrs that break codesign.
+// Disable signing for Debug builds so flutter run works reliably.
+CODE_SIGNING_ALLOWED = NO
+CODE_SIGNING_REQUIRED = NO

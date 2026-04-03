@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -60,18 +61,6 @@ class TailscaleDashboardPage extends StatefulWidget {
   State<TailscaleDashboardPage> createState() => _TailscaleDashboardPageState();
 }
 
-class _SshStreamAttemptResult {
-  const _SshStreamAttemptResult({
-    required this.exitCode,
-    required this.stdoutText,
-    required this.stderrText,
-  });
-
-  final int exitCode;
-  final String stdoutText;
-  final String stderrText;
-}
-
 class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   static const List<String> _commonLinuxSshUsers = <String>[
     'opc',
@@ -99,6 +88,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       TextEditingController(text: 'python3 -');
   final TextEditingController _windowsCleanupPatternController =
       TextEditingController(text: 'scaleserve_stream');
+  final TextEditingController _runtimeInputController = TextEditingController();
   final TextEditingController _remoteCommandController =
       TextEditingController();
 
@@ -119,8 +109,10 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   bool _autoConnectOnLaunch = false;
   bool _setupEnableTailscaleSsh = true;
   bool _autoKillWindowsPythonAfterStreamRun = true;
+  bool _enableInteractiveInputForWindowsStreamRuns = true;
   bool _hasStoredKey = false;
   bool _remoteStopRequested = false;
+  bool _activeRunSupportsRuntimeInput = false;
 
   String? _selectedRemoteDeviceDns;
   Map<String, RemoteDeviceProfile> _remoteProfilesByDns =
@@ -773,6 +765,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     _localStreamFilePathController.dispose();
     _remoteStdinCommandController.dispose();
     _windowsCleanupPatternController.dispose();
+    _runtimeInputController.dispose();
     _remoteCommandController.dispose();
     super.dispose();
   }
@@ -1121,6 +1114,8 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     setState(() {
       _runningRemoteCommand = true;
       _remoteStopRequested = false;
+      _activeRunSupportsRuntimeInput = false;
+      _runtimeInputController.clear();
       _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
       _infoMessage = 'Running remote command on $dnsName...';
     });
@@ -1215,6 +1210,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput = summary.toString().trim();
         _infoMessage = stoppedByUser
             ? 'Remote command stopped by user.'
@@ -1228,6 +1224,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: ${error.message}';
         _infoMessage = 'Could not start ssh command. ${error.message}';
       });
@@ -1237,6 +1234,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: $error';
         _infoMessage = 'Remote execution failed: $error';
       });
@@ -1245,6 +1243,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
         _activeRemoteSshProcess = null;
       }
       _remoteStopRequested = false;
+      _activeRunSupportsRuntimeInput = false;
     }
   }
 
@@ -1290,89 +1289,128 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       });
       return;
     }
+    final localFileLength = await localFile.length();
 
     await _saveRemoteProfile(showMessage: false);
 
-    final target = '$user@$dnsName';
-    final baseSshArgs = <String>[
-      if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
-      target,
-    ];
+    final interactiveWindowsPyStdinRun =
+        _enableInteractiveInputForWindowsStreamRuns &&
+        isWindowsTarget &&
+        _isWindowsPythonStdinCommand(remoteStdinCommand);
 
-    String safeCommandForDisplay(String remoteCommand) {
-      final safeCommand = StringBuffer('ssh ');
-      if (keyPath.isNotEmpty) {
-        safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
-      }
-      safeCommand.write('$target "$remoteCommand" < "$localFilePath"');
-      return safeCommand.toString();
+    final effectiveRemoteStdinCommand = interactiveWindowsPyStdinRun
+        ? _buildWindowsInteractiveStreamCommand(
+              remoteStdinCommand: remoteStdinCommand,
+              scriptByteLength: localFileLength,
+            ) ??
+            remoteStdinCommand
+        : remoteStdinCommand;
+
+    if (interactiveWindowsPyStdinRun &&
+        effectiveRemoteStdinCommand == remoteStdinCommand) {
+      setState(() {
+        _infoMessage =
+            'Interactive stdin mode requires a command like "py -" or "python -".';
+      });
+      return;
     }
 
-    final initialSafeCommand = safeCommandForDisplay(remoteStdinCommand);
+    final target = '$user@$dnsName';
+    final sshArgs = <String>[
+      if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
+      target,
+      effectiveRemoteStdinCommand,
+    ];
+
+    final safeCommand = StringBuffer('ssh ');
+    if (keyPath.isNotEmpty) {
+      safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
+    }
+    final displayCommand = interactiveWindowsPyStdinRun
+        ? '$remoteStdinCommand [interactive wrapper]'
+        : effectiveRemoteStdinCommand;
+    safeCommand.write('$target "$displayCommand" < "$localFilePath"');
 
     setState(() {
       _runningRemoteCommand = true;
       _remoteStopRequested = false;
-      _remoteLiveOutput = 'Command: $initialSafeCommand\n';
+      _activeRunSupportsRuntimeInput = false;
+      _runtimeInputController.clear();
+      _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
       _infoMessage = 'Streaming local file to $dnsName and running remotely...';
     });
 
+    Process? process;
     try {
-      final initialAttempt = await _runSshStreamCommandAttempt(
-        sshArgs: <String>[...baseSshArgs, remoteStdinCommand],
-        localFile: localFile,
-        stdoutPrefix: 'STDOUT: ',
-        stderrPrefix: 'STDERR: ',
-      );
+      process = await Process.start('ssh', sshArgs, runInShell: false);
+      _activeRemoteSshProcess = process;
+      final stdoutBuffer = StringBuffer();
+      final stderrBuffer = StringBuffer();
 
-      _SshStreamAttemptResult finalAttempt = initialAttempt;
-      _SshStreamAttemptResult? fallbackAttempt;
-      String? fallbackCommand;
+      final stdoutDone = Completer<void>();
+      final stderrDone = Completer<void>();
 
-      final shouldRetryWithTempFile =
-          (isWindowsTarget ||
-              _looksLikeWindowsRemoteOutput(
-                stdoutText: initialAttempt.stdoutText,
-                stderrText: initialAttempt.stderrText,
-              )) &&
-          !_remoteStopRequested &&
-          _isWindowsPythonStdinCommand(remoteStdinCommand) &&
-          _looksLikeWindowsPythonStdinSpawnFailure(
-            exitCode: initialAttempt.exitCode,
-            stdoutText: initialAttempt.stdoutText,
-            stderrText: initialAttempt.stderrText,
+      process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            (line) {
+              stdoutBuffer.writeln(line);
+              if (mounted) {
+                setState(() {
+                  _remoteLiveOutput += 'STDOUT: $line\n';
+                });
+              }
+            },
+            onDone: () => stdoutDone.complete(),
+            onError: (_) => stdoutDone.complete(),
+            cancelOnError: false,
           );
 
-      if (shouldRetryWithTempFile) {
-        fallbackCommand = _buildWindowsPythonStdinTempFileCommand(
-          remoteStdinCommand,
-        );
-      }
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            (line) {
+              stderrBuffer.writeln(line);
+              if (mounted) {
+                setState(() {
+                  _remoteLiveOutput += 'STDERR: $line\n';
+                });
+              }
+            },
+            onDone: () => stderrDone.complete(),
+            onError: (_) => stderrDone.complete(),
+            cancelOnError: false,
+          );
 
-      if (fallbackCommand != null && fallbackCommand.isNotEmpty) {
-        final retryCommand = fallbackCommand;
+      await process.stdin.addStream(localFile.openRead());
+      if (interactiveWindowsPyStdinRun) {
         if (mounted) {
           setState(() {
-            _remoteLiveOutput +=
-                '\n[Auto-retry] Detected Windows stdin execution issue with child processes.\n';
-            _remoteLiveOutput +=
-                'Command (retry): ${safeCommandForDisplay(retryCommand)}\n';
+            _activeRunSupportsRuntimeInput = true;
+            _infoMessage =
+                'Script streamed. Send input below if the program prompts.';
           });
+        } else {
+          _activeRunSupportsRuntimeInput = true;
         }
-
-        final retryAttempt = await _runSshStreamCommandAttempt(
-          sshArgs: <String>[...baseSshArgs, retryCommand],
-          localFile: localFile,
-          stdoutPrefix: 'STDOUT (retry): ',
-          stderrPrefix: 'STDERR (retry): ',
-        );
-        fallbackAttempt = retryAttempt;
-        finalAttempt = retryAttempt;
+      } else {
+        await process.stdin.close();
       }
 
-      final exitCode = finalAttempt.exitCode;
-      final stdoutText = finalAttempt.stdoutText;
-      final stderrText = finalAttempt.stderrText;
+      final exitCode = await process.exitCode;
+      await Future.wait([stdoutDone.future, stderrDone.future]);
+      if (interactiveWindowsPyStdinRun) {
+        try {
+          await process.stdin.close();
+        } catch (_) {
+          // Process may already be closed.
+        }
+      }
+
+      final stdoutText = stdoutBuffer.toString().trim();
+      final stderrText = stderrBuffer.toString().trim();
       final stoppedByUser = _remoteStopRequested;
       final success = exitCode == 0;
       final shouldAutoCleanup =
@@ -1388,56 +1426,20 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
                 : 'Skipped auto-cleanup because cleanup pattern is empty.')
           : '';
 
-      final summary = StringBuffer()..writeln('Command: $initialSafeCommand');
-      if (fallbackAttempt != null) {
-        summary
-          ..writeln('Auto retry: enabled (Windows stdin -> temp file).')
-          ..writeln('Initial exit code: ${initialAttempt.exitCode}')
-          ..writeln(
-            'Retry command: ${safeCommandForDisplay(fallbackCommand!)}',
-          );
-      }
-      summary
+      final summary = StringBuffer()
+        ..writeln('Command: ${safeCommand.toString()}')
         ..writeln('Exit code: $exitCode')
         ..writeln('');
-
-      if (fallbackAttempt == null) {
-        if (stdoutText.isNotEmpty) {
-          summary
-            ..writeln('STDOUT:')
-            ..writeln(stdoutText)
-            ..writeln('');
-        }
-        if (stderrText.isNotEmpty) {
-          summary
-            ..writeln('STDERR:')
-            ..writeln(stderrText);
-        }
-      } else {
-        summary.writeln('INITIAL ATTEMPT (STDIN):');
-        if (initialAttempt.stdoutText.isNotEmpty) {
-          summary
-            ..writeln('STDOUT:')
-            ..writeln(initialAttempt.stdoutText);
-        }
-        if (initialAttempt.stderrText.isNotEmpty) {
-          summary
-            ..writeln('STDERR:')
-            ..writeln(initialAttempt.stderrText);
-        }
+      if (stdoutText.isNotEmpty) {
         summary
-          ..writeln('')
-          ..writeln('RETRY ATTEMPT (TEMP FILE):');
-        if (stdoutText.isNotEmpty) {
-          summary
-            ..writeln('STDOUT:')
-            ..writeln(stdoutText);
-        }
-        if (stderrText.isNotEmpty) {
-          summary
-            ..writeln('STDERR:')
-            ..writeln(stderrText);
-        }
+          ..writeln('STDOUT:')
+          ..writeln(stdoutText)
+          ..writeln('');
+      }
+      if (stderrText.isNotEmpty) {
+        summary
+          ..writeln('STDERR:')
+          ..writeln(stderrText);
       }
       if (cleanupOutput.isNotEmpty) {
         summary
@@ -1452,9 +1454,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
           startedAtIso: DateTime.now().toIso8601String(),
           deviceDnsName: dnsName,
           user: user,
-          command:
-              'stream:$localFilePath -> $remoteStdinCommand'
-              '${fallbackAttempt != null ? ' [auto-retry: windows-temp-file]' : ''}',
+          command: 'stream:$localFilePath -> $remoteStdinCommand',
           exitCode: exitCode,
           success: success,
         ),
@@ -1470,16 +1470,13 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput = summary.toString().trim();
         _infoMessage = stoppedByUser
             ? 'Remote stream run stopped by user.'
             : (success
-                  ? (fallbackAttempt == null
-                        ? 'Remote stream run completed on $dnsName.'
-                        : 'Remote stream run completed on $dnsName after automatic retry.')
-                  : (fallbackAttempt == null
-                        ? 'Remote stream run failed on $dnsName (exit $exitCode).'
-                        : 'Remote stream run failed on $dnsName after automatic retry (exit $exitCode).'));
+                  ? 'Remote stream run completed on $dnsName.'
+                  : 'Remote stream run failed on $dnsName (exit $exitCode).');
       });
     } on ProcessException catch (error) {
       if (!mounted) {
@@ -1487,6 +1484,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: ${error.message}';
         _infoMessage = 'Could not start SSH stream command. ${error.message}';
       });
@@ -1496,80 +1494,85 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       }
       setState(() {
         _runningRemoteCommand = false;
+        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: $error';
         _infoMessage = 'Remote stream execution failed: $error';
       });
     } finally {
-      _activeRemoteSshProcess = null;
-      _remoteStopRequested = false;
-    }
-  }
-
-  Future<_SshStreamAttemptResult> _runSshStreamCommandAttempt({
-    required List<String> sshArgs,
-    required File localFile,
-    required String stdoutPrefix,
-    required String stderrPrefix,
-  }) async {
-    final process = await Process.start('ssh', sshArgs, runInShell: false);
-    _activeRemoteSshProcess = process;
-
-    final stdoutBuffer = StringBuffer();
-    final stderrBuffer = StringBuffer();
-    final stdoutDone = Completer<void>();
-    final stderrDone = Completer<void>();
-
-    process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .listen(
-          (line) {
-            stdoutBuffer.writeln(line);
-            if (mounted) {
-              setState(() {
-                _remoteLiveOutput += '$stdoutPrefix$line\n';
-              });
-            }
-          },
-          onDone: () => stdoutDone.complete(),
-          onError: (_) => stdoutDone.complete(),
-          cancelOnError: false,
-        );
-
-    process.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .listen(
-          (line) {
-            stderrBuffer.writeln(line);
-            if (mounted) {
-              setState(() {
-                _remoteLiveOutput += '$stderrPrefix$line\n';
-              });
-            }
-          },
-          onDone: () => stderrDone.complete(),
-          onError: (_) => stderrDone.complete(),
-          cancelOnError: false,
-        );
-
-    try {
-      await process.stdin.addStream(localFile.openRead());
-      await process.stdin.close();
-
-      final exitCode = await process.exitCode;
-      await Future.wait([stdoutDone.future, stderrDone.future]);
-
-      return _SshStreamAttemptResult(
-        exitCode: exitCode,
-        stdoutText: stdoutBuffer.toString().trim(),
-        stderrText: stderrBuffer.toString().trim(),
-      );
-    } finally {
       if (identical(_activeRemoteSshProcess, process)) {
         _activeRemoteSshProcess = null;
       }
+      _remoteStopRequested = false;
+      _activeRunSupportsRuntimeInput = false;
     }
+  }
+
+  Future<void> _sendRuntimeInputLine() async {
+    final process = _activeRemoteSshProcess;
+    final input = _runtimeInputController.text;
+    if (process == null || !_runningRemoteCommand || !_activeRunSupportsRuntimeInput) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active interactive remote command.';
+      });
+      return;
+    }
+
+    try {
+      process.stdin.writeln(input);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'Could not send input to remote process: $error';
+      });
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _runtimeInputController.clear();
+      _remoteLiveOutput += 'STDIN: $input\n';
+      _infoMessage = 'Sent input to remote process.';
+    });
+  }
+
+  Future<void> _sendRuntimeInputEof() async {
+    final process = _activeRemoteSshProcess;
+    if (process == null || !_runningRemoteCommand || !_activeRunSupportsRuntimeInput) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active interactive remote command.';
+      });
+      return;
+    }
+
+    try {
+      await process.stdin.close();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'Could not send EOF to remote process: $error';
+      });
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _activeRunSupportsRuntimeInput = false;
+      _infoMessage = 'Sent EOF to remote process stdin.';
+    });
   }
 
   bool _isWindowsPythonStdinCommand(String command) {
@@ -1580,29 +1583,10 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     return stdinPattern.hasMatch(command.trim());
   }
 
-  bool _looksLikeWindowsPythonStdinSpawnFailure({
-    required int exitCode,
-    required String stdoutText,
-    required String stderrText,
+  String? _buildWindowsInteractiveStreamCommand({
+    required String remoteStdinCommand,
+    required int scriptByteLength,
   }) {
-    final combined = '$stdoutText\n$stderrText'.toLowerCase();
-    return combined.contains('multiprocessing.spawn') ||
-        combined.contains('__mp_main__') ||
-        combined.contains('<stdin>') ||
-        (combined.contains('invalid argument') && combined.contains('stdin'));
-  }
-
-  bool _looksLikeWindowsRemoteOutput({
-    required String stdoutText,
-    required String stderrText,
-  }) {
-    final combined = '$stdoutText\n$stderrText'.toLowerCase();
-    return combined.contains('platform: windows') ||
-        combined.contains(r'c:\') ||
-        combined.contains(r'\users\');
-  }
-
-  String? _buildWindowsPythonStdinTempFileCommand(String remoteStdinCommand) {
     final trimmed = remoteStdinCommand.trim();
     final stdinPattern = RegExp(
       r'^(\s*(?:py|python(?:\d+(?:\.\d+)?)?)\s+)-(?=\s|$)',
@@ -1616,23 +1600,55 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       match,
     ) {
       final prefix = match.group(1) ?? '';
-      return '$prefix"\$f"';
+      return '${prefix}"\$f"';
     });
-
     if (runFromTempCommand == trimmed) {
       return null;
     }
 
     final escapedRunCommand = runFromTempCommand.replaceAll("'", "''");
-    return 'powershell -NoProfile -NonInteractive -Command '
-        '"\$f=Join-Path \$env:TEMP \'scaleserve_stream.py\'; '
-        '\$src=[Console]::In.ReadToEnd(); '
-        '[System.IO.File]::WriteAllText(\$f,\$src,[System.Text.UTF8Encoding]::new(\$false)); '
-        '\$runCmd=\'$escapedRunCommand\'; '
-        'Invoke-Expression \$runCmd; '
-        '\$ec=\$LASTEXITCODE; '
-        'Remove-Item \$f -Force -ErrorAction SilentlyContinue; '
-        'exit \$ec"';
+    final psTemplate = r'''
+$ErrorActionPreference = 'Stop'
+$f = Join-Path $env:TEMP 'scaleserve_stream.py'
+$n = __BYTE_COUNT__
+$inputStream = [Console]::OpenStandardInput()
+$buffer = New-Object byte[] 65536
+$remaining = $n
+$fileStream = [System.IO.File]::Open($f, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+try {
+  while ($remaining -gt 0) {
+    $toRead = [Math]::Min($buffer.Length, $remaining)
+    $read = $inputStream.Read($buffer, 0, $toRead)
+    if ($read -le 0) { break }
+    $fileStream.Write($buffer, 0, $read)
+    $remaining -= $read
+  }
+} finally {
+  $fileStream.Dispose()
+}
+if ($remaining -gt 0) {
+  Write-Error "Expected $n script bytes but received $($n - $remaining)."
+  exit 97
+}
+$runCmd = '__RUN_COMMAND__'
+Invoke-Expression $runCmd
+$ec = $LASTEXITCODE
+Remove-Item $f -Force -ErrorAction SilentlyContinue
+exit $ec
+''';
+    final psScript = psTemplate
+        .replaceAll('__BYTE_COUNT__', scriptByteLength.toString())
+        .replaceAll('__RUN_COMMAND__', escapedRunCommand);
+    final encoded = _encodeUtf16LeBase64(psScript);
+    return 'powershell -NoProfile -NonInteractive -EncodedCommand $encoded';
+  }
+
+  String _encodeUtf16LeBase64(String text) {
+    final bytes = BytesBuilder(copy: false);
+    for (final codeUnit in text.codeUnits) {
+      bytes.add(<int>[codeUnit & 0xff, (codeUnit >> 8) & 0xff]);
+    }
+    return base64.encode(bytes.takeBytes());
   }
 
   Future<void> _stopRunningRemoteCommand() async {
@@ -1666,6 +1682,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       return;
     }
     setState(() {
+      _activeRunSupportsRuntimeInput = false;
       _remoteLiveOutput += '\n[Control] Stop requested by user.\n';
       _infoMessage = killed
           ? 'Stop requested. Waiting for remote process to exit...'

@@ -1300,10 +1300,10 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     final effectiveRemoteStdinCommand = interactiveWindowsPyStdinRun
         ? _buildWindowsInteractiveStreamCommand(
-              remoteStdinCommand: remoteStdinCommand,
-              scriptByteLength: localFileLength,
-            ) ??
-            remoteStdinCommand
+                remoteStdinCommand: remoteStdinCommand,
+                scriptByteLength: localFileLength,
+              ) ??
+              remoteStdinCommand
         : remoteStdinCommand;
 
     if (interactiveWindowsPyStdinRun &&
@@ -1510,7 +1510,9 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   Future<void> _sendRuntimeInputLine() async {
     final process = _activeRemoteSshProcess;
     final input = _runtimeInputController.text;
-    if (process == null || !_runningRemoteCommand || !_activeRunSupportsRuntimeInput) {
+    if (process == null ||
+        !_runningRemoteCommand ||
+        !_activeRunSupportsRuntimeInput) {
       if (!mounted) {
         return;
       }
@@ -1544,7 +1546,9 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
   Future<void> _sendRuntimeInputEof() async {
     final process = _activeRemoteSshProcess;
-    if (process == null || !_runningRemoteCommand || !_activeRunSupportsRuntimeInput) {
+    if (process == null ||
+        !_runningRemoteCommand ||
+        !_activeRunSupportsRuntimeInput) {
       if (!mounted) {
         return;
       }
@@ -2205,6 +2209,30 @@ exit $ec
                                 contentPadding: EdgeInsets.zero,
                                 controlAffinity:
                                     ListTileControlAffinity.leading,
+                                value:
+                                    _enableInteractiveInputForWindowsStreamRuns,
+                                onChanged:
+                                    _runningRemoteCommand ||
+                                        _detectingRemoteUser
+                                    ? null
+                                    : (value) {
+                                        setState(() {
+                                          _enableInteractiveInputForWindowsStreamRuns =
+                                              value ?? true;
+                                        });
+                                      },
+                                title: const Text(
+                                  'Enable interactive input() support for Windows py - stream runs',
+                                ),
+                                subtitle: const Text(
+                                  'Uses a temporary remote file and keeps stdin open so you can send answers while running.',
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
                                 value: _autoKillWindowsPythonAfterStreamRun,
                                 onChanged:
                                     _runningRemoteCommand ||
@@ -2287,6 +2315,44 @@ exit $ec
                             ),
                           ],
                         ),
+                        if (_runningRemoteCommand &&
+                            _activeRunSupportsRuntimeInput) ...[
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: _runtimeInputController,
+                            enabled: _activeRemoteSshProcess != null,
+                            onSubmitted: _activeRemoteSshProcess == null
+                                ? null
+                                : (_) => _sendRuntimeInputLine(),
+                            decoration: const InputDecoration(
+                              border: OutlineInputBorder(),
+                              labelText: 'Runtime input',
+                              hintText:
+                                  'Type a reply for input() and press Send',
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            children: [
+                              FilledButton.icon(
+                                onPressed: _activeRemoteSshProcess == null
+                                    ? null
+                                    : _sendRuntimeInputLine,
+                                icon: const Icon(Icons.send),
+                                label: const Text('Send Input'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _activeRemoteSshProcess == null
+                                    ? null
+                                    : _sendRuntimeInputEof,
+                                icon: const Icon(Icons.subdirectory_arrow_left),
+                                label: const Text('Send EOF'),
+                              ),
+                            ],
+                          ),
+                        ],
                         const SizedBox(height: 10),
                         if (_runningRemoteCommand || _detectingRemoteUser)
                           const LinearProgressIndicator(),

@@ -2,6 +2,10 @@
 
 Cross-platform Flutter desktop app to control Tailscale on macOS and Windows.
 
+## Full Manual
+
+- [ScaleServe Manual](docs/SCALESERVE_MANUAL.md)
+
 ## Features
 
 - View live Tailscale state (`tailscale status --json`)
@@ -17,16 +21,30 @@ Cross-platform Flutter desktop app to control Tailscale on macOS and Windows.
 - Optional targeted auto-cleanup for Windows stream runs (kills only matching `python.exe`/`py.exe` command lines)
 - Stop an in-progress remote SSH run directly from the app
 - Track remote command history in-app
+- Backend API + PostgreSQL login with first-user bootstrap
+- Forgot-password OTP reset and login MFA OTP (delivered by backend Gmail SMTP)
+- Runtime sync to backend PostgreSQL for settings, machine inventory, remote profiles, run logs, and command logs
+- Lightweight local JSON cache for offline resilience (no local database engine)
 
 ## Requirements
 
 - Flutter 3.x+
 - Tailscale installed on the same machine as the app
 - `tailscale` CLI available from PATH (or default install path)
+- ScaleServe backend running (`../scaleserve_backend`) with PostgreSQL
 
 ## Run
 
 ```bash
+# terminal 1
+cd ../scaleserve_backend
+cp .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn src.main:app --host 0.0.0.0 --port 8080
+
+# terminal 2
 cd scaleserve_flutter
 flutter run -d macos
 ```
@@ -34,7 +52,16 @@ flutter run -d macos
 For Windows:
 
 ```bash
-cd scaleserve_flutter
+# terminal 1
+cd ..\scaleserve_backend
+copy .env.example .env
+py -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn src.main:app --host 0.0.0.0 --port 8080
+
+# terminal 2
+cd ..\scaleserve_flutter
 flutter run -d windows
 ```
 
@@ -44,3 +71,6 @@ flutter run -d windows
 - On first run, make sure you can run `tailscale status` in your terminal successfully.
 - For remote command execution, target machines must have your public key in their OpenSSH `authorized_keys` file.
 - On Windows targets, SSH key setup also depends on OpenSSH ACLs and often `administrators_authorized_keys`; the app now handles these in its generated setup command.
+- Authentication and runtime data are validated/persisted by backend PostgreSQL.
+- Optional local cache files are stored in project-local:
+  - `<repo>/scaleserve_runtime/`

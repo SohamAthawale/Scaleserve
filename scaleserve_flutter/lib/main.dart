@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'backend_auth_service.dart';
+import 'app_user.dart';
 import 'local_settings_store.dart';
 import 'remote_compute_store.dart';
 import 'ssh_key_manager.dart';
@@ -15,32 +16,1024 @@ void main() {
   runApp(const ScaleServeApp());
 }
 
-class ScaleServeApp extends StatelessWidget {
+enum _DashboardSection { overview, remote, access, devices, logs }
+
+extension on _DashboardSection {
+  String get label {
+    switch (this) {
+      case _DashboardSection.overview:
+        return 'Overview';
+      case _DashboardSection.remote:
+        return 'Remote Runner';
+      case _DashboardSection.access:
+        return 'Access & Auth';
+      case _DashboardSection.devices:
+        return 'Devices';
+      case _DashboardSection.logs:
+        return 'Logs';
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case _DashboardSection.overview:
+        return Icons.dashboard_outlined;
+      case _DashboardSection.remote:
+        return Icons.terminal_outlined;
+      case _DashboardSection.access:
+        return Icons.vpn_key_outlined;
+      case _DashboardSection.devices:
+        return Icons.devices_outlined;
+      case _DashboardSection.logs:
+        return Icons.article_outlined;
+    }
+  }
+}
+
+class ScaleServeApp extends StatefulWidget {
   const ScaleServeApp({
     super.key,
     this.service,
+    this.authService,
     this.startAutoRefresh = true,
     this.fetchOnStartup = true,
+    this.requireLogin = true,
   });
 
   final TailscaleService? service;
+  final BackendAuthService? authService;
   final bool startAutoRefresh;
   final bool fetchOnStartup;
+  final bool requireLogin;
+
+  @override
+  State<ScaleServeApp> createState() => _ScaleServeAppState();
+}
+
+class _ScaleServeAppState extends State<ScaleServeApp> {
+  late final BackendAuthService _authService;
+  AppUser? _signedInUser;
+
+  @override
+  void initState() {
+    super.initState();
+    _authService = widget.authService ?? BackendAuthService();
+  }
 
   @override
   Widget build(BuildContext context) {
+    const seedColor = Color(0xFF005F73);
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: seedColor,
+      brightness: Brightness.light,
+    );
+
     return MaterialApp(
       title: 'ScaleServe Tailscale Controller',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B7285)),
+        colorScheme: colorScheme,
         useMaterial3: true,
+        scaffoldBackgroundColor: const Color(0xFFF6F8FB),
+        visualDensity: VisualDensity.comfortable,
+        appBarTheme: const AppBarTheme(centerTitle: false),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: BorderSide(
+              color: colorScheme.outline.withValues(alpha: 0.18),
+            ),
+          ),
+          margin: EdgeInsets.zero,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: colorScheme.primary, width: 1.4),
+          ),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
       ),
-      home: TailscaleDashboardPage(
-        service: service ?? TailscaleService(),
-        startAutoRefresh: startAutoRefresh,
-        fetchOnStartup: fetchOnStartup,
+      home: _buildHome(),
+    );
+  }
+
+  Widget _buildHome() {
+    final effectiveService = widget.service ?? TailscaleService();
+    if (!widget.requireLogin) {
+      return TailscaleDashboardPage(
+        service: effectiveService,
+        startAutoRefresh: widget.startAutoRefresh,
+        fetchOnStartup: widget.fetchOnStartup,
+      );
+    }
+
+    final user = _signedInUser;
+    if (user == null) {
+      return ScaleServeLoginPage(
+        authService: _authService,
+        onAuthenticated: (authenticatedUser) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _signedInUser = authenticatedUser;
+          });
+        },
+      );
+    }
+
+    return TailscaleDashboardPage(
+      service: effectiveService,
+      startAutoRefresh: widget.startAutoRefresh,
+      fetchOnStartup: widget.fetchOnStartup,
+      signedInUser: user,
+      onLogout: () {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _signedInUser = null;
+        });
+      },
+    );
+  }
+}
+
+class ScaleServeLoginPage extends StatefulWidget {
+  const ScaleServeLoginPage({
+    super.key,
+    required this.authService,
+    required this.onAuthenticated,
+  });
+
+  final BackendAuthService authService;
+  final ValueChanged<AppUser> onAuthenticated;
+
+  @override
+  State<ScaleServeLoginPage> createState() => _ScaleServeLoginPageState();
+}
+
+class _ScaleServeLoginPageState extends State<ScaleServeLoginPage> {
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController =
+      TextEditingController();
+  final TextEditingController _mfaCodeController = TextEditingController();
+
+  bool _loading = true;
+  bool _working = false;
+  bool _setupMode = false;
+  bool _obscurePassword = true;
+  bool _obscureConfirmPassword = true;
+  bool _obscureMfaCode = true;
+  bool _enableMfaForNewAccount = false;
+  String _statusText = 'Loading authentication...';
+  AppUser? _pendingMfaUser;
+  String? _pendingMfaEmail;
+
+  bool get _inMfaStep => _pendingMfaUser != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMode();
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _mfaCodeController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadMode() async {
+    setState(() {
+      _loading = true;
+      _statusText = 'Loading authentication...';
+      _pendingMfaUser = null;
+      _pendingMfaEmail = null;
+      _mfaCodeController.clear();
+    });
+
+    try {
+      final hasUsers = await widget.authService.hasUsers();
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loading = false;
+        _setupMode = !hasUsers;
+        _statusText = _setupMode
+            ? 'No operator account found. Create one to continue.'
+            : 'Sign in with your Gmail and password.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _statusText = 'Backend authentication unavailable: $error';
+      });
+    }
+  }
+
+  Future<void> _signIn() async {
+    if (_working) {
+      return;
+    }
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+    if (email.isEmpty || password.isEmpty) {
+      setState(() {
+        _statusText = 'Enter Gmail and password.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Validating credentials...';
+    });
+
+    try {
+      final result = await widget.authService.login(
+        email: email,
+        password: password,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (!result.success) {
+        setState(() {
+          _working = false;
+          _statusText = result.message;
+        });
+        return;
+      }
+
+      if (result.mfaRequired) {
+        final user = result.user;
+        final mfaEmail = ((user?.email ?? email)).trim();
+        if (user == null || mfaEmail.isEmpty) {
+          setState(() {
+            _working = false;
+            _statusText = 'MFA is required but recovery Gmail was unavailable.';
+          });
+          return;
+        }
+        setState(() {
+          _working = false;
+          _pendingMfaUser = user;
+          _pendingMfaEmail = mfaEmail;
+          _passwordController.clear();
+          _statusText = 'MFA OTP sent to ${result.maskedEmail ?? '(hidden)'}.';
+        });
+        return;
+      }
+
+      final user = result.user;
+      if (user == null) {
+        setState(() {
+          _working = false;
+          _statusText = 'Sign-in succeeded but user payload was missing.';
+        });
+        return;
+      }
+      _passwordController.clear();
+      widget.onAuthenticated(user);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'Sign-in failed: $error';
+      });
+    }
+  }
+
+  Future<void> _createFirstAccount() async {
+    if (_working) {
+      return;
+    }
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+    final confirm = _confirmPasswordController.text;
+
+    if (email.isEmpty || password.isEmpty || confirm.isEmpty) {
+      setState(() {
+        _statusText = 'Fill Gmail, password, and confirm password.';
+      });
+      return;
+    }
+    if (password != confirm) {
+      setState(() {
+        _statusText = 'Password and confirm password must match.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Creating first operator account...';
+    });
+
+    try {
+      final result = await widget.authService.bootstrapFirstUser(
+        email: email,
+        password: password,
+        mfaEnabled: _enableMfaForNewAccount,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (!result.success || result.user == null) {
+        setState(() {
+          _working = false;
+          final message = result.message.toLowerCase();
+          if (message.contains('bootstrap already completed') ||
+              message.contains('users already exist')) {
+            _setupMode = false;
+            _statusText =
+                'Account already exists. Sign in with Gmail and password.';
+            _confirmPasswordController.clear();
+          } else {
+            _statusText = result.message;
+          }
+        });
+        return;
+      }
+
+      _confirmPasswordController.clear();
+      _passwordController.clear();
+      widget.onAuthenticated(result.user!);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'Could not create account: $error';
+      });
+    }
+  }
+
+  Future<void> _verifyMfaCode() async {
+    if (_working) {
+      return;
+    }
+    final user = _pendingMfaUser;
+    final email = (_pendingMfaEmail ?? '').trim();
+    final otp = _mfaCodeController.text.trim();
+    if (user == null) {
+      return;
+    }
+    if (email.isEmpty) {
+      setState(() {
+        _statusText = 'Recovery Gmail is missing for MFA verification.';
+      });
+      return;
+    }
+    if (otp.isEmpty) {
+      setState(() {
+        _statusText = 'Enter the MFA OTP.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Verifying MFA OTP...';
+    });
+
+    try {
+      final result = await widget.authService.verifyMfaOtp(
+        email: email,
+        otp: otp,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (!result.success || result.user == null) {
+        setState(() {
+          _working = false;
+          _statusText = result.message;
+        });
+        return;
+      }
+
+      _mfaCodeController.clear();
+      widget.onAuthenticated(result.user!);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'MFA verification failed: $error';
+      });
+    }
+  }
+
+  Future<void> _resendMfaCode() async {
+    if (_working) {
+      return;
+    }
+    final email = (_pendingMfaEmail ?? '').trim();
+    if (email.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Sending new MFA OTP...';
+    });
+
+    try {
+      final result = await widget.authService.requestLoginMfaOtp(email: email);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = result.success
+            ? 'New MFA OTP sent to ${result.maskedEmail ?? '(hidden)'}.'
+            : 'Could not resend MFA OTP: ${result.message}';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'Could not resend MFA OTP: $error';
+      });
+    }
+  }
+
+  void _cancelMfaStep() {
+    setState(() {
+      _pendingMfaUser = null;
+      _pendingMfaEmail = null;
+      _mfaCodeController.clear();
+      _statusText = 'MFA cancelled. Sign in again.';
+    });
+  }
+
+  Future<void> _openForgotPasswordDialog() async {
+    if (_working) {
+      return;
+    }
+    final email = _emailController.text.trim();
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return ForgotPasswordDialog(
+          authService: widget.authService,
+          initialEmail: email,
+        );
+      },
+    );
+
+    if (!mounted || result == null || result.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _emailController.text = result;
+      _passwordController.clear();
+      _statusText = 'Password reset complete. Sign in with your new password.';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('ScaleServe', style: theme.textTheme.headlineSmall),
+                      const SizedBox(height: 6),
+                      Text(
+                        _setupMode
+                            ? 'Create first operator account'
+                            : (_inMfaStep
+                                  ? 'Verify MFA OTP'
+                                  : 'Operator sign in'),
+                        style: theme.textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        _inMfaStep
+                            ? 'A one-time code has been sent to your recovery Gmail.'
+                            : 'Authentication is validated through backend API and PostgreSQL.',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 16),
+                      if (_loading) ...[
+                        const LinearProgressIndicator(),
+                        const SizedBox(height: 12),
+                      ],
+                      if (_inMfaStep) ...[
+                        TextField(
+                          controller: _mfaCodeController,
+                          enabled: !_loading && !_working,
+                          obscureText: _obscureMfaCode,
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) {
+                            if (!_loading && !_working) {
+                              _verifyMfaCode();
+                            }
+                          },
+                          decoration: InputDecoration(
+                            labelText: 'MFA OTP',
+                            hintText: '6-digit code',
+                            suffixIcon: IconButton(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _obscureMfaCode = !_obscureMfaCode;
+                                      });
+                                    },
+                              icon: Icon(
+                                _obscureMfaCode
+                                    ? Icons.visibility
+                                    : Icons.visibility_off,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ] else ...[
+                        TextField(
+                          controller: _emailController,
+                          enabled: !_loading && !_working,
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            labelText: 'Gmail',
+                            hintText: 'you@gmail.com',
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _passwordController,
+                          enabled: !_loading && !_working,
+                          obscureText: _obscurePassword,
+                          textInputAction: _setupMode
+                              ? TextInputAction.next
+                              : TextInputAction.done,
+                          onSubmitted: _setupMode
+                              ? null
+                              : (_) {
+                                  if (!_loading && !_working) {
+                                    _signIn();
+                                  }
+                                },
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            hintText: 'Minimum 8 characters',
+                            suffixIcon: IconButton(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _obscurePassword = !_obscurePassword;
+                                      });
+                                    },
+                              icon: Icon(
+                                _obscurePassword
+                                    ? Icons.visibility
+                                    : Icons.visibility_off,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (_setupMode) ...[
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: _confirmPasswordController,
+                            enabled: !_loading && !_working,
+                            obscureText: _obscureConfirmPassword,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) {
+                              if (!_loading && !_working) {
+                                _createFirstAccount();
+                              }
+                            },
+                            decoration: InputDecoration(
+                              labelText: 'Confirm password',
+                              suffixIcon: IconButton(
+                                onPressed: _loading || _working
+                                    ? null
+                                    : () {
+                                        setState(() {
+                                          _obscureConfirmPassword =
+                                              !_obscureConfirmPassword;
+                                        });
+                                      },
+                                icon: Icon(
+                                  _obscureConfirmPassword
+                                      ? Icons.visibility
+                                      : Icons.visibility_off,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          CheckboxListTile(
+                            contentPadding: EdgeInsets.zero,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            value: _enableMfaForNewAccount,
+                            onChanged: _loading || _working
+                                ? null
+                                : (value) {
+                                    setState(() {
+                                      _enableMfaForNewAccount = value ?? false;
+                                    });
+                                  },
+                            title: const Text('Enable MFA at sign-in'),
+                            subtitle: const Text(
+                              'Requires OTP sender Gmail configured on the backend.',
+                            ),
+                          ),
+                        ] else ...[
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : _openForgotPasswordDialog,
+                              child: const Text('Forgot password?'),
+                            ),
+                          ),
+                        ],
+                      ],
+                      const SizedBox(height: 14),
+                      if (_inMfaStep)
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            FilledButton.icon(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : _verifyMfaCode,
+                              icon: const Icon(Icons.verified_user),
+                              label: Text(
+                                _working ? 'Please wait...' : 'Verify OTP',
+                              ),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : _resendMfaCode,
+                              icon: const Icon(
+                                Icons.mark_email_unread_outlined,
+                              ),
+                              label: const Text('Resend OTP'),
+                            ),
+                            TextButton(
+                              onPressed: _loading || _working
+                                  ? null
+                                  : _cancelMfaStep,
+                              child: const Text('Cancel'),
+                            ),
+                          ],
+                        )
+                      else
+                        Row(
+                          children: [
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _loading || _working
+                                    ? null
+                                    : (_setupMode
+                                          ? _createFirstAccount
+                                          : _signIn),
+                                icon: Icon(
+                                  _setupMode ? Icons.person_add : Icons.login,
+                                ),
+                                label: Text(
+                                  _working
+                                      ? 'Please wait...'
+                                      : (_setupMode
+                                            ? 'Create Account & Sign In'
+                                            : 'Sign In'),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: _working ? null : _loadMode,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Refresh'),
+                            ),
+                          ],
+                        ),
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.surfaceContainerHighest
+                              .withValues(alpha: 0.55),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(_statusText),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
+    );
+  }
+}
+
+class ForgotPasswordDialog extends StatefulWidget {
+  const ForgotPasswordDialog({
+    super.key,
+    required this.authService,
+    required this.initialEmail,
+  });
+
+  final BackendAuthService authService;
+  final String initialEmail;
+
+  @override
+  State<ForgotPasswordDialog> createState() => _ForgotPasswordDialogState();
+}
+
+class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _otpController = TextEditingController();
+  final TextEditingController _newPasswordController = TextEditingController();
+  final TextEditingController _confirmPasswordController =
+      TextEditingController();
+
+  bool _working = false;
+  bool _otpSent = false;
+  bool _obscureNewPassword = true;
+  bool _obscureConfirmPassword = true;
+  String _statusText = 'Enter recovery Gmail to send password reset OTP.';
+
+  @override
+  void initState() {
+    super.initState();
+    _emailController.text = widget.initialEmail;
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _otpController.dispose();
+    _newPasswordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendOtp() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      setState(() {
+        _statusText = 'Enter Gmail first.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Sending password reset OTP...';
+    });
+
+    try {
+      final result = await widget.authService.requestForgotPasswordOtp(
+        email: email,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _otpSent = result.success;
+        _statusText = result.success
+            ? 'OTP sent to ${result.maskedEmail ?? '(hidden)'}.'
+            : result.message;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'Could not send OTP: $error';
+      });
+    }
+  }
+
+  Future<void> _resetPassword() async {
+    final email = _emailController.text.trim();
+    final otp = _otpController.text.trim();
+    final newPassword = _newPasswordController.text;
+    final confirm = _confirmPasswordController.text;
+
+    if (email.isEmpty ||
+        otp.isEmpty ||
+        newPassword.isEmpty ||
+        confirm.isEmpty) {
+      setState(() {
+        _statusText = 'Fill Gmail, OTP, and both password fields.';
+      });
+      return;
+    }
+    if (newPassword != confirm) {
+      setState(() {
+        _statusText = 'New password and confirm password must match.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _statusText = 'Resetting password...';
+    });
+
+    try {
+      final result = await widget.authService.resetPassword(
+        email: email,
+        otp: otp,
+        newPassword: newPassword,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (!result.success) {
+        setState(() {
+          _working = false;
+          _statusText = result.message;
+        });
+        return;
+      }
+      Navigator.of(context).pop(email);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _working = false;
+        _statusText = 'Password reset failed: $error';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Forgot Password'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _emailController,
+              enabled: !_working,
+              decoration: const InputDecoration(
+                labelText: 'Recovery Gmail',
+                hintText: 'you@gmail.com',
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (_otpSent) ...[
+              TextField(
+                controller: _otpController,
+                enabled: !_working,
+                decoration: const InputDecoration(
+                  labelText: 'OTP',
+                  hintText: '6-digit code',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _newPasswordController,
+                enabled: !_working,
+                obscureText: _obscureNewPassword,
+                decoration: InputDecoration(
+                  labelText: 'New password',
+                  hintText: 'Minimum 8 characters',
+                  suffixIcon: IconButton(
+                    onPressed: _working
+                        ? null
+                        : () {
+                            setState(() {
+                              _obscureNewPassword = !_obscureNewPassword;
+                            });
+                          },
+                    icon: Icon(
+                      _obscureNewPassword
+                          ? Icons.visibility
+                          : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _confirmPasswordController,
+                enabled: !_working,
+                obscureText: _obscureConfirmPassword,
+                decoration: InputDecoration(
+                  labelText: 'Confirm new password',
+                  suffixIcon: IconButton(
+                    onPressed: _working
+                        ? null
+                        : () {
+                            setState(() {
+                              _obscureConfirmPassword =
+                                  !_obscureConfirmPassword;
+                            });
+                          },
+                    icon: Icon(
+                      _obscureConfirmPassword
+                          ? Icons.visibility
+                          : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                color: Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+              ),
+              child: Text(_statusText),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _working ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        if (_otpSent)
+          OutlinedButton(
+            onPressed: _working ? null : _sendOtp,
+            child: const Text('Resend OTP'),
+          ),
+        FilledButton(
+          onPressed: _working ? null : (_otpSent ? _resetPassword : _sendOtp),
+          child: Text(_otpSent ? 'Reset Password' : 'Send OTP'),
+        ),
+      ],
     );
   }
 }
@@ -51,11 +1044,15 @@ class TailscaleDashboardPage extends StatefulWidget {
     required this.service,
     required this.startAutoRefresh,
     required this.fetchOnStartup,
+    this.signedInUser,
+    this.onLogout,
   });
 
   final TailscaleService service;
   final bool startAutoRefresh;
   final bool fetchOnStartup;
+  final AppUser? signedInUser;
+  final VoidCallback? onLogout;
 
   @override
   State<TailscaleDashboardPage> createState() => _TailscaleDashboardPageState();
@@ -91,6 +1088,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   final TextEditingController _runtimeInputController = TextEditingController();
   final TextEditingController _remoteCommandController =
       TextEditingController();
+  final TextEditingController _deviceSearchController = TextEditingController();
 
   TailscaleSnapshot? _snapshot;
   String _infoMessage = 'Checking Tailscale status...';
@@ -109,10 +1107,14 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   bool _autoConnectOnLaunch = false;
   bool _setupEnableTailscaleSsh = true;
   bool _autoKillWindowsPythonAfterStreamRun = true;
-  bool _enableInteractiveInputForWindowsStreamRuns = true;
+  bool _enableInteractiveInputForPythonStreamRuns = false;
   bool _hasStoredKey = false;
   bool _remoteStopRequested = false;
   bool _activeRunSupportsRuntimeInput = false;
+  bool _showRemoteAdvancedOptions = false;
+  bool _showRemoteStreamOptions = false;
+  _DashboardSection _activeSection = _DashboardSection.overview;
+  String _deviceSearchQuery = '';
 
   String? _selectedRemoteDeviceDns;
   Map<String, RemoteDeviceProfile> _remoteProfilesByDns =
@@ -433,16 +1435,210 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     }
   }
 
-  String _posixAuthorizedKeySetupCommand() {
+  String _bashEncodedCommand(String script) {
+    final encoded = base64Encode(utf8.encode(script));
+    return 'bash -lc "TMP=/tmp/scaleserve_ssh_doctor.sh && '
+        'printf %s \'$encoded\' | '
+        '(base64 --decode 2>/dev/null || base64 -d 2>/dev/null || base64 -D 2>/dev/null) > \\\$TMP && '
+        'bash \\\$TMP; STATUS=\\\$?; rm -f \\\$TMP; exit \\\$STATUS"';
+  }
+
+  String _posixSshDoctorCommand() {
     if (_sshPublicKey.isEmpty) {
       return '';
     }
 
-    final escaped = _sshPublicKey.replaceAll("'", "'\"'\"'");
-    return 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys '
-        '&& chmod 600 ~/.ssh/authorized_keys && '
-        '(grep -qxF \'$escaped\' ~/.ssh/authorized_keys || '
-        'printf \'%s\\n\' \'$escaped\' >> ~/.ssh/authorized_keys)';
+    const scriptTemplate = r'''
+set -eu
+
+say() {
+  printf '%s\\n' "$1"
+}
+
+fail() {
+  say 'ScaleServe POSIX SSH Doctor: FAILED'
+  say "$1"
+  exit 1
+}
+
+KEY_B64='__SCALESERVE_KEY_B64__'
+KEY="$(printf %s "$KEY_B64" | (base64 --decode 2>/dev/null || base64 -d 2>/dev/null || base64 -D 2>/dev/null || echo ''))"
+
+if [ -z "$KEY" ]; then
+  fail 'SSH key payload is empty.'
+fi
+
+OS="$(uname -s 2>/dev/null || echo unknown)"
+TARGET_USER="$(id -un 2>/dev/null || echo user)"
+TARGET_HOME="${HOME:-}"
+
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  TARGET_USER="$SUDO_USER"
+  TARGET_HOME="$(eval echo "~$SUDO_USER" 2>/dev/null || echo "$HOME")"
+fi
+
+if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+  fail "Unable to determine home directory for $TARGET_USER."
+fi
+
+USER_SSH_DIR="$TARGET_HOME/.ssh"
+USER_AUTH="$USER_SSH_DIR/authorized_keys"
+
+mkdir -p "$USER_SSH_DIR"
+chmod 700 "$USER_SSH_DIR"
+touch "$USER_AUTH"
+chmod 600 "$USER_AUTH"
+grep -qxF "$KEY" "$USER_AUTH" || printf '%s\\n' "$KEY" >> "$USER_AUTH"
+
+if [ "$(id -u)" -eq 0 ]; then
+  chown "$TARGET_USER" "$USER_SSH_DIR" "$USER_AUTH" >/dev/null 2>&1 || true
+fi
+
+if grep -qxF "$KEY" "$USER_AUTH"; then
+  KEY_OK=yes
+else
+  KEY_OK=no
+fi
+
+if [ "$KEY_OK" != "yes" ]; then
+  fail "Key was not persisted in $USER_AUTH"
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+ensure_openssh_linux() {
+  if command -v sshd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ]; then
+    return 1
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    $SUDO apt-get update -y >/dev/null 2>&1 || true
+    $SUDO apt-get install -y openssh-server >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y openssh-server >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y openssh-server >/dev/null 2>&1 || true
+  elif command -v zypper >/dev/null 2>&1; then
+    $SUDO zypper --non-interactive install openssh >/dev/null 2>&1 || true
+  elif command -v pacman >/dev/null 2>&1; then
+    $SUDO pacman -Sy --noconfirm openssh >/dev/null 2>&1 || true
+  fi
+
+  command -v sshd >/dev/null 2>&1
+}
+
+SERVICE_STARTED=no
+SERVICE_NAME=unknown
+
+if [ "$OS" = "Darwin" ]; then
+  if command -v systemsetup >/dev/null 2>&1; then
+    $SUDO systemsetup -setremotelogin on >/dev/null 2>&1 || true
+  fi
+  if command -v launchctl >/dev/null 2>&1; then
+    $SUDO launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
+    $SUDO launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
+    $SUDO launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+  fi
+  SERVICE_NAME=sshd
+else
+  ensure_openssh_linux >/dev/null 2>&1 || true
+
+  if command -v systemctl >/dev/null 2>&1; then
+    for svc in ssh sshd; do
+      $SUDO systemctl enable "$svc" >/dev/null 2>&1 || true
+      $SUDO systemctl start "$svc" >/dev/null 2>&1 || true
+      $SUDO systemctl restart "$svc" >/dev/null 2>&1 || true
+      if $SUDO systemctl is-active "$svc" >/dev/null 2>&1; then
+        SERVICE_STARTED=yes
+        SERVICE_NAME="$svc"
+        break
+      fi
+    done
+  elif command -v service >/dev/null 2>&1; then
+    for svc in ssh sshd; do
+      $SUDO service "$svc" start >/dev/null 2>&1 || true
+      if $SUDO service "$svc" status >/dev/null 2>&1; then
+        SERVICE_STARTED=yes
+        SERVICE_NAME="$svc"
+        break
+      fi
+    done
+  elif command -v rc-service >/dev/null 2>&1; then
+    for svc in sshd ssh; do
+      $SUDO rc-service "$svc" start >/dev/null 2>&1 || true
+      if $SUDO rc-service "$svc" status >/dev/null 2>&1; then
+        SERVICE_STARTED=yes
+        SERVICE_NAME="$svc"
+        break
+      fi
+    done
+  fi
+fi
+
+if [ "$OS" = "Darwin" ]; then
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:22 -sTCP:LISTEN >/dev/null 2>&1; then
+    SERVICE_STARTED=yes
+  fi
+fi
+
+if command -v ufw >/dev/null 2>&1; then
+  $SUDO ufw allow 22/tcp >/dev/null 2>&1 || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1; then
+  $SUDO firewall-cmd --add-service=ssh --permanent >/dev/null 2>&1 || true
+  $SUDO firewall-cmd --add-service=ssh >/dev/null 2>&1 || true
+fi
+
+if command -v sshd >/dev/null 2>&1; then
+  sshd -t >/dev/null 2>&1 || true
+fi
+
+PORT_OK=no
+if command -v ss >/dev/null 2>&1; then
+  ss -lnt 2>/dev/null | grep -Eq '(^|[[:space:]])(0\\.0\\.0\\.0|::|\\*):22[[:space:]]' && PORT_OK=yes || true
+elif command -v lsof >/dev/null 2>&1; then
+  lsof -nP -iTCP:22 -sTCP:LISTEN >/dev/null 2>&1 && PORT_OK=yes || true
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -an 2>/dev/null | grep -E 'LISTEN|LISTENING' | grep -Eq '[:.]22[[:space:]]' && PORT_OK=yes || true
+fi
+
+if [ "$PORT_OK" != "yes" ]; then
+  fail 'Port 22 is not listening. Re-run once with admin/root privileges and verify OpenSSH server is installed and enabled.'
+fi
+
+say 'ScaleServe POSIX SSH Doctor: SUCCESS'
+say "OS: $OS"
+say "target user: $TARGET_USER"
+say "authorized_keys: $USER_AUTH (key present=$KEY_OK)"
+say "ssh service candidate: $SERVICE_NAME (started=$SERVICE_STARTED)"
+say "port 22 listening: $PORT_OK"
+say 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_dns> "echo scaleserve-ssh-ok"'
+''';
+
+    final keyB64 = base64Encode(utf8.encode(_sshPublicKey.trim()));
+    final script = scriptTemplate.replaceAll('__SCALESERVE_KEY_B64__', keyB64);
+    return _bashEncodedCommand(script);
+  }
+
+  String _powershellEncodedCommand(String script) {
+    final bytes = <int>[];
+    for (final codeUnit in script.codeUnits) {
+      bytes.add(codeUnit & 0xFF);
+      bytes.add((codeUnit >> 8) & 0xFF);
+    }
+    final encoded = base64Encode(bytes);
+    return 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded';
   }
 
   String _windowsAuthorizedKeySetupCommand() {
@@ -450,61 +1646,269 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       return '';
     }
 
-    final escaped = _sshPublicKey.replaceAll("'", "''");
-    const scriptTemplate =
-        r"$ErrorActionPreference = 'Stop'; "
-        r"function Write-KeyFile([string]$path, [string]$line) { "
-        r"  New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null; "
-        r"  $lines = @(); "
-        r"  if (Test-Path $path) { "
-        r"    $lines = Get-Content -Path $path -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' } "
-        r"  }; "
-        r"  if ($lines -notcontains $line) { $lines += $line }; "
-        r"  $enc = New-Object System.Text.UTF8Encoding($false); "
-        r"  [System.IO.File]::WriteAllLines($path, $lines, $enc) "
-        r"}; "
-        r"$key = '__SCALESERVE_KEY__'; "
-        r"$userAuth = Join-Path (Join-Path $env:USERPROFILE '.ssh') 'authorized_keys'; "
-        r"Write-KeyFile $userAuth $key; "
-        r"& icacls (Split-Path $userAuth) /inheritance:r /grant ($env:USERNAME + ':(OI)(CI)F') /grant 'SYSTEM:F' | Out-Null; "
-        r"& icacls $userAuth /inheritance:r /grant ($env:USERNAME + ':F') /grant 'SYSTEM:F' | Out-Null; "
-        r"$adminAuth = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; "
-        r"try { "
-        r"  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); "
-        r"  if ($isAdmin) { "
-        r"    Write-KeyFile $adminAuth $key; "
-        r"    & icacls $adminAuth /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null "
-        r"  } "
-        r"} catch { }; "
-        r"if (Get-Service sshd -ErrorAction SilentlyContinue) { "
-        r"  try { "
-        r"    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue; "
-        r"    Start-Service sshd -ErrorAction SilentlyContinue; "
-        r"    Restart-Service sshd -ErrorAction SilentlyContinue "
-        r"  } catch { } "
-        r"}";
+    const scriptTemplate = r'''
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
-    final script = scriptTemplate.replaceAll('__SCALESERVE_KEY__', escaped);
-    return 'powershell -NoProfile -NonInteractive -Command "$script"';
+$key = @'
+__SCALESERVE_KEY__
+'@.Trim()
+
+if ([string]::IsNullOrWhiteSpace($key)) {
+  throw 'ScaleServe SSH key is empty.'
+}
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+function Write-UniqueLine([string]$Path, [string]$Line) {
+  $dir = Split-Path -Path $Path
+  if (-not (Test-Path -LiteralPath $dir)) {
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  }
+
+  $lines = @()
+  if (Test-Path -LiteralPath $Path) {
+    $lines = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.Trim() } |
+      Where-Object { $_ -ne '' }
+  }
+
+  if ($lines -notcontains $Line) {
+    $lines += $Line
+  }
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($Path, $lines, $utf8NoBom)
+}
+
+function Ensure-OpenSshServer {
+  $cap = Get-WindowsCapability -Online | Where-Object { $_.Name -like 'OpenSSH.Server*' } | Select-Object -First 1
+  if ($null -eq $cap) {
+    throw 'OpenSSH.Server capability not found.'
+  }
+
+  if ($cap.State -ne 'Installed') {
+    if (-not $isAdmin) {
+      throw 'OpenSSH.Server is not installed. Re-run as Administrator to install it.'
+    }
+    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+  }
+
+  if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+    throw 'sshd service is unavailable after OpenSSH install.'
+  }
+}
+
+function Set-GlobalSshdDirective([string]$Name, [string]$Value) {
+  if (-not $isAdmin) {
+    return
+  }
+
+  $configPath = Join-Path $env:ProgramData 'ssh\sshd_config'
+  if (-not (Test-Path -LiteralPath $configPath)) {
+    throw "sshd_config not found at $configPath"
+  }
+
+  $lines = Get-Content -LiteralPath $configPath -ErrorAction Stop
+  $firstMatchIndex = $lines.Count
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^\s*Match\s+') {
+      $firstMatchIndex = $i
+      break
+    }
+  }
+
+  $directiveRegex = '^\s*#?\s*' + [regex]::Escape($Name) + '\s+'
+  $updated = $false
+  for ($i = 0; $i -lt $firstMatchIndex; $i++) {
+    if ($lines[$i] -match $directiveRegex) {
+      $lines[$i] = "$Name $Value"
+      $updated = $true
+      break
+    }
+  }
+
+  if (-not $updated) {
+    if ($firstMatchIndex -lt 0 -or $firstMatchIndex -gt $lines.Count) {
+      $firstMatchIndex = $lines.Count
+    }
+    $head = @()
+    $tail = @()
+    if ($firstMatchIndex -gt 0) { $head = $lines[0..($firstMatchIndex - 1)] }
+    if ($firstMatchIndex -lt $lines.Count) { $tail = $lines[$firstMatchIndex..($lines.Count - 1)] }
+    $lines = @($head + @("$Name $Value") + $tail)
+  }
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($configPath, $lines, $utf8NoBom)
+}
+
+function Ensure-FirewallRule {
+  if (-not $isAdmin) {
+    return
+  }
+
+  if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) {
+    Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null
+  } else {
+    New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+  }
+}
+
+Ensure-OpenSshServer
+Ensure-FirewallRule
+Set-GlobalSshdDirective -Name 'PubkeyAuthentication' -Value 'yes'
+
+if ($isAdmin) {
+  Set-Service -Name sshd -StartupType Automatic
+  Start-Service -Name sshd
+}
+
+$userAuth = Join-Path (Join-Path $env:USERPROFILE '.ssh') 'authorized_keys'
+Write-UniqueLine -Path $userAuth -Line $key
+& icacls (Split-Path $userAuth) /inheritance:r /grant:r ($env:USERNAME + ':(OI)(CI)F') /grant:r 'SYSTEM:(OI)(CI)F' | Out-Null
+& icacls $userAuth /inheritance:r /grant:r ($env:USERNAME + ':F') /grant:r 'SYSTEM:F' | Out-Null
+
+$adminAuth = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+if ($isAdmin) {
+  Write-UniqueLine -Path $adminAuth -Line $key
+  & icacls $adminAuth /inheritance:r /grant:r 'Administrators:F' /grant:r 'SYSTEM:F' | Out-Null
+}
+
+try {
+  Restart-Service -Name sshd -Force -ErrorAction Stop
+} catch {
+  $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
+  if ($null -eq $service -or $service.Status -ne 'Running') {
+    throw
+  }
+}
+
+$service = Get-Service -Name sshd
+if ($service.Status -ne 'Running') {
+  throw 'sshd service is not running.'
+}
+
+$portCheck = Test-NetConnection -ComputerName '127.0.0.1' -Port 22 -WarningAction SilentlyContinue
+if (-not $portCheck.TcpTestSucceeded) {
+  throw 'TCP port 22 is not reachable on localhost.'
+}
+
+$userKeyPresent = Select-String -Path $userAuth -SimpleMatch $key -Quiet
+if (-not $userKeyPresent) {
+  throw "Key was not persisted in $userAuth"
+}
+
+$adminKeyPresent = $false
+if (Test-Path -LiteralPath $adminAuth) {
+  $adminKeyPresent = Select-String -Path $adminAuth -SimpleMatch $key -Quiet
+}
+
+Write-Host 'ScaleServe Windows SSH Doctor: SUCCESS'
+Write-Host ('sshd status: ' + $service.Status)
+Write-Host ('Local port 22 check: ' + $portCheck.TcpTestSucceeded)
+Write-Host ('User authorized_keys: ' + $userAuth + ' (key present=' + $userKeyPresent + ')')
+if ($isAdmin) {
+  Write-Host ('Admin authorized_keys: ' + $adminAuth + ' (key present=' + $adminKeyPresent + ')')
+}
+Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_dns> \"echo scaleserve-ssh-ok\"'
+''';
+
+    final script = scriptTemplate.replaceAll(
+      '__SCALESERVE_KEY__',
+      _sshPublicKey.trim(),
+    );
+    return _powershellEncodedCommand(script);
+  }
+
+  bool _isWindowsPeer(TailscalePeer? peer) {
+    return (peer?.os ?? '').toLowerCase().contains('windows');
+  }
+
+  bool _isMacPeer(TailscalePeer? peer) {
+    final os = (peer?.os ?? '').toLowerCase();
+    return os.contains('mac') || os.contains('darwin') || os.contains('osx');
+  }
+
+  bool _isLinuxPeer(TailscalePeer? peer) {
+    final os = (peer?.os ?? '').toLowerCase();
+    return os.contains('linux') ||
+        os.contains('ubuntu') ||
+        os.contains('debian') ||
+        os.contains('fedora') ||
+        os.contains('centos') ||
+        os.contains('arch');
   }
 
   String _targetSshSetupCommandForPeer(TailscalePeer? peer) {
-    final os = (peer?.os ?? '').toLowerCase();
-    if (os.contains('windows')) {
+    if (_isWindowsPeer(peer)) {
       return _windowsAuthorizedKeySetupCommand();
     }
-    return _posixAuthorizedKeySetupCommand();
+    return _posixSshDoctorCommand();
+  }
+
+  String _targetSshDoctorButtonLabel(TailscalePeer? peer) {
+    if (_isWindowsPeer(peer)) {
+      return 'Copy Windows SSH Doctor Command';
+    }
+    if (_isMacPeer(peer)) {
+      return 'Copy macOS SSH Doctor Command';
+    }
+    if (_isLinuxPeer(peer)) {
+      return 'Copy Linux SSH Doctor Command';
+    }
+    return 'Copy SSH Doctor Command';
+  }
+
+  String _targetSshDoctorCopiedMessage(TailscalePeer? peer) {
+    if (_isWindowsPeer(peer)) {
+      return 'Copied Windows SSH Doctor + key setup command.';
+    }
+    if (_isMacPeer(peer)) {
+      return 'Copied macOS SSH Doctor + key setup command.';
+    }
+    if (_isLinuxPeer(peer)) {
+      return 'Copied Linux SSH Doctor + key setup command.';
+    }
+    return 'Copied SSH Doctor + key setup command.';
+  }
+
+  String _targetSshDoctorQuickSetupHint(TailscalePeer? peer) {
+    if (_isWindowsPeer(peer)) {
+      return 'run it once as Administrator on the target.';
+    }
+    if (_isMacPeer(peer)) {
+      return 'run it once on the target in Terminal (use sudo when prompted).';
+    }
+    if (_isLinuxPeer(peer)) {
+      return 'run it once on the target (use sudo/root if needed).';
+    }
+    return 'run it once on the target.';
+  }
+
+  String _targetSshDoctorTip(TailscalePeer? peer) {
+    if (_isWindowsPeer(peer)) {
+      return 'Tip: On Windows targets, run the Windows SSH Doctor command once with admin rights to auto-fix OpenSSH service, firewall, config, and key placement.';
+    }
+    if (_isMacPeer(peer)) {
+      return 'Tip: On macOS targets, run the macOS SSH Doctor command once to validate authorized_keys, enable Remote Login, and check port 22.';
+    }
+    if (_isLinuxPeer(peer)) {
+      return 'Tip: On Linux/Ubuntu targets, run the Linux SSH Doctor command once to validate key placement, start sshd, and check port 22.';
+    }
+    return 'Tip: Run the SSH Doctor command once on the target to validate key placement and SSH service health.';
   }
 
   String _targetOsLabel(TailscalePeer? peer) {
-    final os = (peer?.os ?? '').toLowerCase();
-    if (os.contains('windows')) {
+    if (_isWindowsPeer(peer)) {
       return 'Windows';
     }
-    if (os.contains('mac')) {
+    if (_isMacPeer(peer)) {
       return 'macOS';
     }
-    if (os.contains('linux')) {
+    if (_isLinuxPeer(peer)) {
       return 'Linux';
     }
     return 'target';
@@ -522,8 +1926,51 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     await _copyToClipboard(
       text: command,
-      successMessage:
-          'Copied SSH setup command for ${_targetOsLabel(peer)} target.',
+      successMessage: _targetSshDoctorCopiedMessage(peer),
+    );
+  }
+
+  String _sshValidationCommand({
+    required String user,
+    required String dnsName,
+    required String keyPath,
+  }) {
+    final buffer = StringBuffer(
+      'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new ',
+    );
+    if (keyPath.trim().isNotEmpty) {
+      buffer.write('-i "$keyPath" -o IdentitiesOnly=yes ');
+    }
+    buffer.write('$user@$dnsName "echo scaleserve-ssh-ok"');
+    return buffer.toString();
+  }
+
+  Future<void> _copySshValidationCommand() async {
+    final dnsName = _selectedRemoteDeviceDns;
+    final user = _remoteUserController.text.trim();
+    if (dnsName == null || dnsName.isEmpty) {
+      setState(() {
+        _infoMessage = 'Select a target device first.';
+      });
+      return;
+    }
+    if (user.isEmpty) {
+      setState(() {
+        _infoMessage =
+            'Remote SSH user is required before copying validation command.';
+      });
+      return;
+    }
+
+    final keyPath = _remoteKeyPathController.text.trim();
+    final command = _sshValidationCommand(
+      user: user,
+      dnsName: dnsName,
+      keyPath: keyPath,
+    );
+    await _copyToClipboard(
+      text: command,
+      successMessage: 'Copied SSH validation command.',
     );
   }
 
@@ -539,6 +1986,80 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       text: _sshPublicKey,
       successMessage: 'Copied SSH public key.',
     );
+  }
+
+  Future<void> _runQuickSshSetup() async {
+    final dnsName = _selectedRemoteDeviceDns;
+    final peer = _peerByDnsName(dnsName ?? '');
+    if (dnsName == null || dnsName.isEmpty) {
+      setState(() {
+        _infoMessage = 'Select a target device first.';
+      });
+      return;
+    }
+    if (_runningRemoteCommand || _detectingRemoteUser || _generatingSshKey) {
+      return;
+    }
+
+    setState(() {
+      _showRemoteAdvancedOptions = true;
+      _infoMessage =
+          'Quick setup started for $dnsName: ensuring key, detecting SSH user, and testing access.';
+    });
+
+    await _generateSshKeyPair();
+    if (!mounted) {
+      return;
+    }
+    if (_sshPublicKey.isEmpty) {
+      setState(() {
+        _infoMessage =
+            'Quick setup could not prepare the SSH key. Open Advanced SSH options and generate key manually.';
+      });
+      return;
+    }
+
+    final bootstrapKeyPath = _bootstrapKeyPathController.text.trim();
+    final bootstrapUser = _remoteUserController.text.trim();
+    if (bootstrapKeyPath.isNotEmpty && bootstrapUser.isNotEmpty) {
+      await _installPublicKeyOnRemote();
+      if (!mounted) {
+        return;
+      }
+    } else {
+      final osLabel = _targetOsLabel(peer);
+      final setupCommandLabel = _targetSshDoctorButtonLabel(peer);
+      final runHint = _targetSshDoctorQuickSetupHint(peer);
+      setState(() {
+        _infoMessage = osLabel == 'target'
+            ? 'If SSH still fails, click $setupCommandLabel and $runHint'
+            : '$osLabel target detected. If SSH still fails, click $setupCommandLabel and $runHint';
+      });
+    }
+
+    if (_remoteUserController.text.trim().isEmpty) {
+      await _detectRemoteSshUser();
+      if (!mounted) {
+        return;
+      }
+    }
+
+    if (_remoteUserController.text.trim().isEmpty) {
+      setState(() {
+        _infoMessage =
+            'Quick setup could not detect a working SSH user. Open Advanced SSH options, set user manually, then run Test SSH Access.';
+      });
+      return;
+    }
+
+    await _testSshAccess();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _showRemoteAdvancedOptions = false;
+    });
   }
 
   Future<void> _installPublicKeyOnRemote() async {
@@ -767,6 +2288,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     _windowsCleanupPatternController.dispose();
     _runtimeInputController.dispose();
     _remoteCommandController.dispose();
+    _deviceSearchController.dispose();
     super.dispose();
   }
 
@@ -787,6 +2309,11 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
         _lastUpdated = DateTime.now();
         _infoMessage = 'Status refreshed successfully.';
       });
+      try {
+        await _remoteComputeStore.recordMachineSnapshot(snapshot: snapshot);
+      } catch (_) {
+        // Keep UI flow running even if snapshot persistence fails.
+      }
       _ensureRemoteSelectionForSnapshot(snapshot);
     } catch (error) {
       if (!mounted) {
@@ -825,6 +2352,18 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
             ? successMessage
             : 'Command failed (exit ${result.exitCode}).';
       });
+
+      try {
+        await _remoteComputeStore.appendCommandLog(
+          commandText: result.commandString,
+          safeCommandText: result.safeCommandString,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        );
+      } catch (_) {
+        // Ignore command log persistence failures.
+      }
 
       await _refreshStatus(showLoader: false);
     } catch (error) {
@@ -1110,6 +2649,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
     }
     safeCommand.write('$target $remoteCommand');
+    final startedAt = DateTime.now().toUtc();
 
     setState(() {
       _runningRemoteCommand = true;
@@ -1132,13 +2672,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       process.stdout
           .transform(utf8.decoder)
-          .transform(const LineSplitter())
           .listen(
-            (line) {
-              stdoutBuffer.writeln(line);
+            (chunk) {
+              stdoutBuffer.write(chunk);
               if (mounted) {
                 setState(() {
-                  _remoteLiveOutput += 'STDOUT: $line\n';
+                  _remoteLiveOutput += 'STDOUT: $chunk';
                 });
               }
             },
@@ -1149,13 +2688,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       process.stderr
           .transform(utf8.decoder)
-          .transform(const LineSplitter())
           .listen(
-            (line) {
-              stderrBuffer.writeln(line);
+            (chunk) {
+              stderrBuffer.write(chunk);
               if (mounted) {
                 setState(() {
-                  _remoteLiveOutput += 'STDERR: $line\n';
+                  _remoteLiveOutput += 'STDERR: $chunk';
                 });
               }
             },
@@ -1171,6 +2709,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       final stderrText = stderrBuffer.toString().trim();
       final stoppedByUser = _remoteStopRequested;
       final success = exitCode == 0;
+      final finishedAt = DateTime.now().toUtc();
 
       final summary = StringBuffer()
         ..writeln('Command: ${safeCommand.toString()}')
@@ -1191,12 +2730,20 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       _remoteExecutionHistory.insert(
         0,
         RemoteExecutionRecord(
-          startedAtIso: DateTime.now().toIso8601String(),
+          startedAtIso: startedAt.toIso8601String(),
+          finishedAtIso: finishedAt.toIso8601String(),
           deviceDnsName: dnsName,
           user: user,
           command: remoteCommand,
           exitCode: exitCode,
           success: success,
+          stdout: stdoutText,
+          stderr: stderrText,
+          runType: 'remote_command',
+          metadataJson: jsonEncode(<String, dynamic>{
+            'safeCommand': safeCommand.toString(),
+            'stoppedByUser': stoppedByUser,
+          }),
         ),
       );
       if (_remoteExecutionHistory.length > 30) {
@@ -1293,20 +2840,19 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     await _saveRemoteProfile(showMessage: false);
 
-    final interactiveWindowsPyStdinRun =
-        _enableInteractiveInputForWindowsStreamRuns &&
-        isWindowsTarget &&
-        _isWindowsPythonStdinCommand(remoteStdinCommand);
+    final interactivePythonStdinRun =
+        _enableInteractiveInputForPythonStreamRuns &&
+        _isPythonStdinCommand(remoteStdinCommand);
 
-    final effectiveRemoteStdinCommand = interactiveWindowsPyStdinRun
-        ? _buildWindowsInteractiveStreamCommand(
+    final effectiveRemoteStdinCommand = interactivePythonStdinRun
+        ? _buildPythonInteractiveStreamCommand(
                 remoteStdinCommand: remoteStdinCommand,
                 scriptByteLength: localFileLength,
               ) ??
               remoteStdinCommand
         : remoteStdinCommand;
 
-    if (interactiveWindowsPyStdinRun &&
+    if (interactivePythonStdinRun &&
         effectiveRemoteStdinCommand == remoteStdinCommand) {
       setState(() {
         _infoMessage =
@@ -1317,6 +2863,14 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
     final target = '$user@$dnsName';
     final sshArgs = <String>[
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'NumberOfPasswordPrompts=0',
+      '-o',
+      'ConnectTimeout=8',
+      '-o',
+      'StrictHostKeyChecking=accept-new',
       if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
       target,
       effectiveRemoteStdinCommand,
@@ -1326,10 +2880,15 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     if (keyPath.isNotEmpty) {
       safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
     }
-    final displayCommand = interactiveWindowsPyStdinRun
+    safeCommand.write(
+      '-o BatchMode=yes -o NumberOfPasswordPrompts=0 '
+      '-o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new ',
+    );
+    final displayCommand = interactivePythonStdinRun
         ? '$remoteStdinCommand [interactive wrapper]'
         : effectiveRemoteStdinCommand;
     safeCommand.write('$target "$displayCommand" < "$localFilePath"');
+    final startedAt = DateTime.now().toUtc();
 
     setState(() {
       _runningRemoteCommand = true;
@@ -1352,13 +2911,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       process.stdout
           .transform(utf8.decoder)
-          .transform(const LineSplitter())
           .listen(
-            (line) {
-              stdoutBuffer.writeln(line);
+            (chunk) {
+              stdoutBuffer.write(chunk);
               if (mounted) {
                 setState(() {
-                  _remoteLiveOutput += 'STDOUT: $line\n';
+                  _remoteLiveOutput += 'STDOUT: $chunk';
                 });
               }
             },
@@ -1369,13 +2927,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       process.stderr
           .transform(utf8.decoder)
-          .transform(const LineSplitter())
           .listen(
-            (line) {
-              stderrBuffer.writeln(line);
+            (chunk) {
+              stderrBuffer.write(chunk);
               if (mounted) {
                 setState(() {
-                  _remoteLiveOutput += 'STDERR: $line\n';
+                  _remoteLiveOutput += 'STDERR: $chunk';
                 });
               }
             },
@@ -1385,12 +2942,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
           );
 
       await process.stdin.addStream(localFile.openRead());
-      if (interactiveWindowsPyStdinRun) {
+      if (interactivePythonStdinRun) {
         if (mounted) {
           setState(() {
             _activeRunSupportsRuntimeInput = true;
             _infoMessage =
-                'Script streamed. Send input below if the program prompts.';
+                'Script streamed. Waiting for runtime input. Send input lines below, then click Send EOF when prompts are done.';
           });
         } else {
           _activeRunSupportsRuntimeInput = true;
@@ -1401,7 +2958,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
 
       final exitCode = await process.exitCode;
       await Future.wait([stdoutDone.future, stderrDone.future]);
-      if (interactiveWindowsPyStdinRun) {
+      if (interactivePythonStdinRun) {
         try {
           await process.stdin.close();
         } catch (_) {
@@ -1413,6 +2970,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       final stderrText = stderrBuffer.toString().trim();
       final stoppedByUser = _remoteStopRequested;
       final success = exitCode == 0;
+      final finishedAt = DateTime.now().toUtc();
       final shouldAutoCleanup =
           isWindowsTarget && _autoKillWindowsPythonAfterStreamRun;
       final cleanupOutput = shouldAutoCleanup
@@ -1451,12 +3009,24 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       _remoteExecutionHistory.insert(
         0,
         RemoteExecutionRecord(
-          startedAtIso: DateTime.now().toIso8601String(),
+          startedAtIso: startedAt.toIso8601String(),
+          finishedAtIso: finishedAt.toIso8601String(),
           deviceDnsName: dnsName,
           user: user,
           command: 'stream:$localFilePath -> $remoteStdinCommand',
           exitCode: exitCode,
           success: success,
+          stdout: stdoutText,
+          stderr: stderrText,
+          runType: 'stream_file',
+          localFilePath: localFilePath,
+          metadataJson: jsonEncode(<String, dynamic>{
+            'safeCommand': safeCommand.toString(),
+            'cleanupApplied': shouldAutoCleanup,
+            'cleanupPattern': windowsCleanupPattern,
+            'interactiveInput': interactivePythonStdinRun,
+            'stoppedByUser': stoppedByUser,
+          }),
         ),
       );
       if (_remoteExecutionHistory.length > 30) {
@@ -1579,7 +3149,7 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     });
   }
 
-  bool _isWindowsPythonStdinCommand(String command) {
+  bool _isPythonStdinCommand(String command) {
     final stdinPattern = RegExp(
       r'^(?:py|python(?:\d+(?:\.\d+)?)?)\s+-(?=\s|$)',
       caseSensitive: false,
@@ -1587,72 +3157,71 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     return stdinPattern.hasMatch(command.trim());
   }
 
-  String? _buildWindowsInteractiveStreamCommand({
+  String? _buildPythonInteractiveStreamCommand({
     required String remoteStdinCommand,
     required int scriptByteLength,
   }) {
     final trimmed = remoteStdinCommand.trim();
     final stdinPattern = RegExp(
-      r'^(\s*(?:py|python(?:\d+(?:\.\d+)?)?)\s+)-(?=\s|$)',
+      r'^\s*(py|python(?:\d+(?:\.\d+)?)?)\s+-(?:\s+(.*))?$',
       caseSensitive: false,
     );
-    if (!stdinPattern.hasMatch(trimmed)) {
+    final match = stdinPattern.firstMatch(trimmed);
+    if (match == null) {
       return null;
     }
 
-    final runFromTempCommand = trimmed.replaceFirstMapped(stdinPattern, (
-      match,
-    ) {
-      final prefix = match.group(1) ?? '';
-      return '${prefix}"\$f"';
-    });
-    if (runFromTempCommand == trimmed) {
+    final launcher = match.group(1);
+    if (launcher == null || launcher.isEmpty) {
       return null;
     }
+    final trailingArgs = (match.group(2) ?? '').trim();
 
-    final escapedRunCommand = runFromTempCommand.replaceAll("'", "''");
-    final psTemplate = r'''
-$ErrorActionPreference = 'Stop'
-$f = Join-Path $env:TEMP 'scaleserve_stream.py'
-$n = __BYTE_COUNT__
-$inputStream = [Console]::OpenStandardInput()
-$buffer = New-Object byte[] 65536
-$remaining = $n
-$fileStream = [System.IO.File]::Open($f, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
-try {
-  while ($remaining -gt 0) {
-    $toRead = [Math]::Min($buffer.Length, $remaining)
-    $read = $inputStream.Read($buffer, 0, $toRead)
-    if ($read -le 0) { break }
-    $fileStream.Write($buffer, 0, $read)
-    $remaining -= $read
-  }
-} finally {
-  $fileStream.Dispose()
-}
-if ($remaining -gt 0) {
-  Write-Error "Expected $n script bytes but received $($n - $remaining)."
-  exit 97
-}
-$runCmd = '__RUN_COMMAND__'
-Invoke-Expression $runCmd
-$ec = $LASTEXITCODE
-Remove-Item $f -Force -ErrorAction SilentlyContinue
-exit $ec
+    const bootstrapScript = '''
+import os
+import subprocess
+import sys
+import tempfile
+
+n = int(sys.argv[1])
+args = sys.argv[2:]
+path = os.path.join(tempfile.gettempdir(), 'scaleserve_stream.py')
+remaining = n
+
+with open(path, 'wb') as handle:
+    while remaining > 0:
+        chunk = sys.stdin.buffer.read(remaining)
+        if not chunk:
+            break
+        handle.write(chunk)
+        remaining -= len(chunk)
+
+if remaining > 0:
+    print(f"ERROR: expected {n} script bytes, received {n - remaining}.", file=sys.stderr)
+    raise SystemExit(97)
+
+try:
+    rc = subprocess.call([sys.executable, "-u", path, *args], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+finally:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+raise SystemExit(rc)
 ''';
-    final psScript = psTemplate
-        .replaceAll('__BYTE_COUNT__', scriptByteLength.toString())
-        .replaceAll('__RUN_COMMAND__', escapedRunCommand);
-    final encoded = _encodeUtf16LeBase64(psScript);
-    return 'powershell -NoProfile -NonInteractive -EncodedCommand $encoded';
-  }
 
-  String _encodeUtf16LeBase64(String text) {
-    final bytes = BytesBuilder(copy: false);
-    for (final codeUnit in text.codeUnits) {
-      bytes.add(<int>[codeUnit & 0xff, (codeUnit >> 8) & 0xff]);
+    final bootstrapEncoded = base64.encode(utf8.encode(bootstrapScript));
+    final command = StringBuffer()
+      ..write('$launcher -c ')
+      ..write(
+        '"import base64;exec(base64.b64decode(\'$bootstrapEncoded\').decode(\'utf-8\'))"',
+      )
+      ..write(' $scriptByteLength');
+    if (trailingArgs.isNotEmpty) {
+      command.write(' $trailingArgs');
     }
-    return base64.encode(bytes.takeBytes());
+    return command.toString();
   }
 
   Future<void> _stopRunningRemoteCommand() async {
@@ -1772,6 +3341,7 @@ exit $ec
     if (action == 'select_remote') {
       _selectRemoteDevice(peer.normalizedDnsName);
       setState(() {
+        _activeSection = _DashboardSection.remote;
         _infoMessage = 'Selected ${peer.name} for remote compute runner.';
       });
       return;
@@ -1883,801 +3453,1173 @@ exit $ec
     );
   }
 
+  String _formatDateTime(DateTime? value) {
+    if (value == null) {
+      return 'Not yet';
+    }
+    final local = value.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} '
+        '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+  }
+
+  String _sectionDescription(_DashboardSection section) {
+    switch (section) {
+      case _DashboardSection.overview:
+        return 'Quick status and core connectivity actions.';
+      case _DashboardSection.remote:
+        return 'Run commands on remote tailnet devices through SSH.';
+      case _DashboardSection.access:
+        return 'Manage auth key preferences and one-click setup.';
+      case _DashboardSection.devices:
+        return 'Browse peers, filter devices, and run shortcuts.';
+      case _DashboardSection.logs:
+        return 'Inspect local command output and remote runner logs.';
+    }
+  }
+
+  bool _peerMatchesQuery(TailscalePeer peer, String query) {
+    if (query.isEmpty) {
+      return true;
+    }
+    final q = query.toLowerCase();
+    return peer.name.toLowerCase().contains(q) ||
+        peer.normalizedDnsName.toLowerCase().contains(q) ||
+        peer.ipAddress.toLowerCase().contains(q) ||
+        peer.os.toLowerCase().contains(q);
+  }
+
+  Widget _buildOutputPanel({
+    required BuildContext context,
+    required String text,
+    required String emptyText,
+    double maxHeight = 320,
+  }) {
+    final display = text.trim().isEmpty ? emptyText : text;
+    final theme = Theme.of(context);
+
+    return Container(
+      width: double.infinity,
+      constraints: BoxConstraints(minHeight: 120, maxHeight: maxHeight),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: theme.colorScheme.outline.withValues(alpha: 0.22),
+        ),
+        color: theme.colorScheme.surface.withValues(alpha: 0.55),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(12),
+        child: SelectableText(
+          display,
+          style: theme.textTheme.bodySmall?.copyWith(
+            fontFamily: 'monospace',
+            height: 1.45,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusChip({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+  }) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: theme.colorScheme.surface.withValues(alpha: 0.9),
+        border: Border.all(
+          color: theme.colorScheme.outline.withValues(alpha: 0.2),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [Icon(icon, size: 15), const SizedBox(width: 6), Text(label)],
+      ),
+    );
+  }
+
+  Widget _buildSectionSelector(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: _DashboardSection.values
+          .map((section) {
+            final selected = _activeSection == section;
+            return ChoiceChip(
+              selected: selected,
+              showCheckmark: false,
+              avatar: Icon(
+                section.icon,
+                size: 18,
+                color: selected ? Theme.of(context).colorScheme.primary : null,
+              ),
+              label: Text(section.label),
+              onSelected: (_) {
+                setState(() {
+                  _activeSection = section;
+                });
+              },
+            );
+          })
+          .toList(growable: false),
+    );
+  }
+
+  Widget _buildStatusCard({
+    required BuildContext context,
+    required TailscaleSnapshot? snapshot,
+    required bool connected,
+    required String stateText,
+    required Color stateColor,
+    required String lastUpdatedText,
+  }) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          gradient: LinearGradient(
+            colors: [
+              theme.colorScheme.primary.withValues(alpha: 0.11),
+              theme.colorScheme.secondary.withValues(alpha: 0.08),
+            ],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.circle, size: 12, color: stateColor),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      connected
+                          ? 'Connected ($stateText)'
+                          : 'Not connected ($stateText)',
+                      style: theme.textTheme.titleMedium,
+                    ),
+                  ),
+                  if (_loadingStatus || _runningAction)
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _buildStatusChip(
+                    context: context,
+                    icon: Icons.laptop_mac_outlined,
+                    label: 'Device: ${snapshot?.selfName ?? 'Unknown'}',
+                  ),
+                  _buildStatusChip(
+                    context: context,
+                    icon: Icons.person_outline,
+                    label: 'User: ${snapshot?.loginName ?? 'Unknown'}',
+                  ),
+                  _buildStatusChip(
+                    context: context,
+                    icon: Icons.hub_outlined,
+                    label: 'Tailnet: ${snapshot?.tailnetName ?? 'Unknown'}',
+                  ),
+                  _buildStatusChip(
+                    context: context,
+                    icon: Icons.schedule,
+                    label: 'Updated: $lastUpdatedText',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _isBusy
+                        ? null
+                        : () => _refreshStatus(showLoader: true),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh status'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _isBusy ? null : _toggleConnection,
+                    icon: Icon(connected ? Icons.power_off : Icons.power),
+                    label: Text(connected ? 'Disconnect' : 'Connect'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _activeSection = _DashboardSection.remote;
+                      });
+                    },
+                    icon: const Icon(Icons.terminal),
+                    label: const Text('Open Remote Runner'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOverviewCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Connection Controls',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Use direct commands for troubleshooting or scripted workflows.',
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _isBusy
+                      ? null
+                      : () => _runAction(
+                          successMessage: 'Tailscale connected.',
+                          action: () => widget.service.connect(),
+                        ),
+                  icon: const Icon(Icons.link),
+                  label: const Text('Run tailscale up'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _isBusy
+                      ? null
+                      : () => _runAction(
+                          successMessage: 'Tailscale disconnected.',
+                          action: widget.service.disconnect,
+                        ),
+                  icon: const Icon(Icons.link_off),
+                  label: const Text('Run tailscale down'),
+                ),
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _activeSection = _DashboardSection.logs;
+                    });
+                  },
+                  icon: const Icon(Icons.article_outlined),
+                  label: const Text('View latest logs'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRemoteRunnerCard({
+    required BuildContext context,
+    required List<TailscalePeer> remoteCandidates,
+    required String? selectedRemoteDns,
+  }) {
+    final theme = Theme.of(context);
+    final isBusy =
+        _runningRemoteCommand || _detectingRemoteUser || _generatingSshKey;
+    final selectedPeer = _peerByDnsName(selectedRemoteDns ?? '');
+    final setupCommandLabel = _targetSshDoctorButtonLabel(selectedPeer);
+    final setupTip = _targetSshDoctorTip(selectedPeer);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Remote Compute Runner', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            const Text(
+              'Use Quick Setup for the fastest path: select target, click Quick Setup, then run your command.',
+            ),
+            if (selectedRemoteDns != null) ...[
+              const SizedBox(height: 10),
+              _buildStatusChip(
+                context: context,
+                icon: Icons.memory_outlined,
+                label: 'Selected target: $selectedRemoteDns',
+              ),
+            ],
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.2),
+                ),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Quick Setup (Recommended)',
+                    style: theme.textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    '1) Select target device  2) Click Quick Setup  3) Run your command',
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: isBusy ? null : _runQuickSshSetup,
+                        icon: const Icon(Icons.auto_fix_high),
+                        label: Text(isBusy ? 'Please wait...' : 'Quick Setup'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _sshPublicKey.isEmpty
+                            ? null
+                            : _copyTargetSshBootstrapCommand,
+                        icon: const Icon(Icons.terminal),
+                        label: Text(setupCommandLabel),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: isBusy ? null : _copySshValidationCommand,
+                        icon: const Icon(Icons.check_circle_outline),
+                        label: const Text('Copy Validate SSH Command'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: isBusy ? null : _installPublicKeyOnRemote,
+                        icon: const Icon(Icons.published_with_changes),
+                        label: const Text('Install Key On Remote'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_sshKeyStatusText, style: theme.textTheme.bodySmall),
+                  const SizedBox(height: 6),
+                  Text(setupTip),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue:
+                  (selectedRemoteDns != null &&
+                      remoteCandidates.any(
+                        (peer) => peer.normalizedDnsName == selectedRemoteDns,
+                      ))
+                  ? selectedRemoteDns
+                  : null,
+              decoration: const InputDecoration(labelText: 'Target device'),
+              items: remoteCandidates
+                  .map(
+                    (peer) => DropdownMenuItem<String>(
+                      value: peer.normalizedDnsName,
+                      child: Text('${peer.name} (${peer.normalizedDnsName})'),
+                    ),
+                  )
+                  .toList(),
+              onChanged: _runningRemoteCommand || _detectingRemoteUser
+                  ? null
+                  : (value) => _selectRemoteDevice(value),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _remoteUserController,
+              enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+              decoration: const InputDecoration(
+                labelText: 'Remote SSH user',
+                hintText: 'ubuntu / opc / ec2-user',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _remoteCommandController,
+              enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+              minLines: 2,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Remote command',
+                hintText: 'cd /path/to/project && python3 script.py',
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                FilledButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : _runRemoteCommand,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Run On Selected Device'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : () => _saveRemoteProfile(showMessage: true),
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save Device Profile'),
+                ),
+                OutlinedButton.icon(
+                  onPressed:
+                      _runningRemoteCommand && _activeRemoteSshProcess != null
+                      ? _stopRunningRemoteCommand
+                      : null,
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('Stop Running Command'),
+                ),
+                TextButton(
+                  onPressed:
+                      _runningRemoteCommand ||
+                          _detectingRemoteUser ||
+                          _remoteExecutionHistory.isEmpty
+                      ? null
+                      : _clearRemoteHistory,
+                  child: const Text('Clear Run History'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text('Advanced SSH Options'),
+              subtitle: const Text(
+                'Manual key actions, detection, and first-time bootstrap key path.',
+              ),
+              initiallyExpanded: _showRemoteAdvancedOptions,
+              onExpansionChanged: (expanded) {
+                setState(() {
+                  _showRemoteAdvancedOptions = expanded;
+                });
+              },
+              children: [
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _remoteKeyPathController,
+                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  decoration: const InputDecoration(
+                    labelText: 'SSH key path (optional)',
+                    hintText: '~/.ssh/id_ed25519',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _bootstrapKeyPathController,
+                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  decoration: const InputDecoration(
+                    labelText: 'Bootstrap key path (first-time setup)',
+                    hintText: '~/.ssh/oracle_server_key.pem',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _generatingSshKey ? null : _generateSshKeyPair,
+                      icon: const Icon(Icons.key),
+                      label: const Text('Regenerate / Ensure Key'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _sshPublicKey.isEmpty ? null : _copyPublicKey,
+                      icon: const Icon(Icons.copy),
+                      label: const Text('Copy Public Key'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _runningRemoteCommand || _detectingRemoteUser
+                          ? null
+                          : _detectRemoteSshUser,
+                      icon: const Icon(Icons.person_search),
+                      label: Text(
+                        _detectingRemoteUser
+                            ? 'Detecting...'
+                            : 'Detect SSH User',
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _runningRemoteCommand || _detectingRemoteUser
+                          ? null
+                          : _testSshAccess,
+                      icon: const Icon(Icons.verified_user),
+                      label: const Text('Test SSH Access'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text('Run Local File On Remote (Advanced)'),
+              subtitle: const Text(
+                'Stream local file over SSH stdin without permanent upload.',
+              ),
+              initiallyExpanded: _showRemoteStreamOptions,
+              onExpansionChanged: (expanded) {
+                setState(() {
+                  _showRemoteStreamOptions = expanded;
+                });
+              },
+              children: [
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _localStreamFilePathController,
+                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  decoration: const InputDecoration(
+                    labelText: 'Local file path to stream',
+                    hintText: '/Users/you/path/script.py',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _remoteStdinCommandController,
+                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  decoration: const InputDecoration(
+                    labelText: 'Remote command (reads stdin)',
+                    hintText: 'python3 -',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: _enableInteractiveInputForPythonStreamRuns,
+                  onChanged: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _enableInteractiveInputForPythonStreamRuns =
+                                value ?? true;
+                          });
+                        },
+                  title: const Text(
+                    'Enable interactive input() support for python - stream runs',
+                  ),
+                  subtitle: const Text(
+                    'Keeps stdin open so you can answer prompts while running (can wait until you send EOF).',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: _autoKillWindowsPythonAfterStreamRun,
+                  onChanged: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _autoKillWindowsPythonAfterStreamRun =
+                                value ?? true;
+                          });
+                        },
+                  title: const Text(
+                    'Auto-clean matched python/py process after stream run on Windows',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _windowsCleanupPatternController,
+                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  decoration: const InputDecoration(
+                    labelText: 'Windows cleanup match (command line contains)',
+                    hintText: 'scaleserve_stream',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : _runLocalFileOnRemoteCompute,
+                  icon: const Icon(Icons.upload_file),
+                  label: const Text('Stream Local File And Run'),
+                ),
+              ],
+            ),
+            if (_runningRemoteCommand && _activeRunSupportsRuntimeInput) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _runtimeInputController,
+                enabled: _activeRemoteSshProcess != null,
+                onSubmitted: _activeRemoteSshProcess == null
+                    ? null
+                    : (_) => _sendRuntimeInputLine(),
+                decoration: const InputDecoration(
+                  labelText: 'Runtime input',
+                  hintText: 'Type a reply for input() and press Send',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _activeRemoteSshProcess == null
+                        ? null
+                        : _sendRuntimeInputLine,
+                    icon: const Icon(Icons.send),
+                    label: const Text('Send Input'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _activeRemoteSshProcess == null
+                        ? null
+                        : _sendRuntimeInputEof,
+                    icon: const Icon(Icons.subdirectory_arrow_left),
+                    label: const Text('Send EOF'),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 10),
+            if (_runningRemoteCommand || _detectingRemoteUser)
+              const LinearProgressIndicator(),
+            const SizedBox(height: 8),
+            _buildOutputPanel(
+              context: context,
+              text: _remoteLiveOutput,
+              emptyText: 'No remote command run yet.',
+              maxHeight: 360,
+            ),
+            const SizedBox(height: 12),
+            Text('Run history', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            if (_remoteExecutionHistory.isEmpty)
+              const Text('No remote commands run yet.')
+            else
+              ..._remoteExecutionHistory
+                  .take(8)
+                  .map(
+                    (record) => ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        record.success
+                            ? Icons.check_circle
+                            : Icons.error_outline,
+                        color: record.success ? Colors.green : Colors.red,
+                      ),
+                      title: Text('${record.user}@${record.deviceDnsName}'),
+                      subtitle: Text(
+                        '${record.command}\n${_historyTime(record.startedAtIso)}  •  exit ${record.exitCode}',
+                      ),
+                      isThreeLine: true,
+                    ),
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAccessCard({
+    required BuildContext context,
+    required bool tailscaleSshSupportedHere,
+  }) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Re-auth / Switch Tailnet',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Tailscale keeps one active connection per device. '
+              'Use this flow to re-authenticate or switch tailnet contexts.',
+            ),
+            const SizedBox(height: 6),
+            Text(
+              tailscaleSshSupportedHere
+                  ? 'On a new laptop, one-click setup can join with SSH enabled.'
+                  : 'On Windows, one-click setup joins the tailnet but skips --ssh.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _authKeyController,
+              enabled: !_isBusy,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Auth key (optional)',
+                hintText: 'tskey-...',
+              ),
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Remember auth key on this computer'),
+              value: _rememberAuthKey,
+              onChanged: _isBusy
+                  ? null
+                  : (value) {
+                      setState(() {
+                        _rememberAuthKey = value ?? false;
+                      });
+                    },
+            ),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Auto-connect on app launch with saved key'),
+              value: _autoConnectOnLaunch,
+              onChanged: _isBusy
+                  ? null
+                  : (value) {
+                      setState(() {
+                        _autoConnectOnLaunch = value ?? false;
+                      });
+                    },
+            ),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text(
+                tailscaleSshSupportedHere
+                    ? 'Enable Tailscale SSH during one-click setup'
+                    : 'Enable Tailscale SSH during one-click setup (not supported on Windows)',
+              ),
+              value: tailscaleSshSupportedHere && _setupEnableTailscaleSsh,
+              onChanged: _isBusy || !tailscaleSshSupportedHere
+                  ? null
+                  : (value) {
+                      setState(() {
+                        _setupEnableTailscaleSsh = value ?? true;
+                      });
+                    },
+            ),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _isBusy ? null : _saveKeyPreferences,
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save key preferences'),
+                ),
+                TextButton(
+                  onPressed: _isBusy || !_hasStoredKey ? null : _clearSavedKey,
+                  child: const Text('Clear saved key'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Divider(),
+            const SizedBox(height: 10),
+            Text(
+              'Authentication + OTP Source of Truth',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Login, MFA, forgot-password, machine snapshots, and run logs are backed by the Python API + PostgreSQL. '
+              'Configure Gmail OTP sender in `scaleserve_backend/.env`, then restart backend.',
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                FilledButton.icon(
+                  onPressed: _isBusy ? null : _connectNewSession,
+                  icon: const Icon(Icons.add_link),
+                  label: const Text('Re-authenticate'),
+                ),
+                FilledButton.icon(
+                  onPressed: _isBusy ? null : _setupThisLaptop,
+                  icon: const Icon(Icons.rocket_launch),
+                  label: const Text('One-Click Setup This Laptop'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAutomationCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Join Commands',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Install Tailscale on each PC and run one of these commands '
+              'to connect devices to the same tailnet.',
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _isBusy
+                      ? null
+                      : () => _copyToClipboard(
+                          text: _macJoinCommand(),
+                          successMessage: 'Copied macOS join command.',
+                        ),
+                  icon: const Icon(Icons.desktop_mac),
+                  label: const Text('Copy macOS command'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _isBusy
+                      ? null
+                      : () => _copyToClipboard(
+                          text: _windowsJoinCommand(),
+                          successMessage: 'Copied Windows join command.',
+                        ),
+                  icon: const Icon(Icons.desktop_windows),
+                  label: const Text('Copy Windows command'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _isBusy
+                      ? null
+                      : () => _copyToClipboard(
+                          text: _linuxJoinCommand(),
+                          successMessage: 'Copied Linux join command.',
+                        ),
+                  icon: const Icon(Icons.computer),
+                  label: const Text('Copy Linux command'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'If auth key is blank, commands use tskey-REPLACE_ME placeholder.',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDevicesCard({
+    required BuildContext context,
+    required TailscaleSnapshot? snapshot,
+  }) {
+    final peers = snapshot?.peers ?? const <TailscalePeer>[];
+    final query = _deviceSearchQuery.trim();
+    final filteredPeers = peers
+        .where((peer) => _peerMatchesQuery(peer, query))
+        .toList(growable: false);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Connected Devices',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _deviceSearchController,
+              onChanged: (value) {
+                setState(() {
+                  _deviceSearchQuery = value;
+                });
+              },
+              decoration: InputDecoration(
+                labelText: 'Filter by name, DNS, IP, or OS',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _deviceSearchQuery.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: () {
+                          _deviceSearchController.clear();
+                          setState(() {
+                            _deviceSearchQuery = '';
+                          });
+                        },
+                        icon: const Icon(Icons.close),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Showing ${filteredPeers.length} of ${peers.length} peer device(s)',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            if (snapshot == null || peers.isEmpty)
+              const Text('No peers found from current status.')
+            else ...[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: const Icon(Icons.laptop_mac, color: Colors.blueGrey),
+                title: Text('${snapshot.selfName} (This device)'),
+                subtitle: Text(
+                  '${snapshot.selfIpAddress}  •  ${snapshot.selfDnsName}',
+                ),
+              ),
+              if (filteredPeers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text('No peers match the current filter.'),
+                )
+              else
+                ...filteredPeers.map(
+                  (peer) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: Icon(
+                      peer.online
+                          ? Icons.check_circle
+                          : Icons.remove_circle_outline,
+                      color: peer.online ? Colors.green : Colors.grey,
+                    ),
+                    title: Text(peer.name),
+                    subtitle: Text(
+                      '${peer.ipAddress}  •  ${peer.normalizedDnsName}  •  ${peer.os}',
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      tooltip: 'Device actions',
+                      onSelected: (value) =>
+                          _handlePeerMenuAction(peer: peer, action: value),
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'select_remote',
+                          child: Text('Use in Remote Runner'),
+                        ),
+                        PopupMenuItem(
+                          value: 'ping_now',
+                          child: Text('Ping now'),
+                        ),
+                        PopupMenuItem(
+                          value: 'copy_ping',
+                          child: Text('Copy ping command'),
+                        ),
+                        PopupMenuItem(
+                          value: 'copy_ssh',
+                          child: Text('Copy SSH command template'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLogsCard({
+    required BuildContext context,
+    required String title,
+    required String text,
+    required String emptyText,
+    required bool showProgress,
+  }) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            if (showProgress) const LinearProgressIndicator(),
+            if (showProgress) const SizedBox(height: 8),
+            _buildOutputPanel(
+              context: context,
+              text: text,
+              emptyText: emptyText,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoCard(BuildContext context) {
+    final lower = _infoMessage.toLowerCase();
+    final isError = lower.contains('error') || lower.contains('failed');
+    final color = isError ? Colors.red.shade50 : Colors.teal.shade50;
+    final icon = isError ? Icons.error_outline : Icons.info_outline;
+
+    return Card(
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          color: color,
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon),
+            const SizedBox(width: 10),
+            Expanded(child: Text(_infoMessage)),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final snapshot = _snapshot;
     final connected = snapshot?.isConnected ?? false;
     final stateText = snapshot?.backendState ?? 'Unknown';
-    final stateColor = connected ? Colors.green : Colors.orange;
+    final stateColor = connected
+        ? const Color(0xFF1F7A4F)
+        : const Color(0xFFB54708);
     final remoteCandidates = snapshot?.peers ?? const <TailscalePeer>[];
     final selectedRemoteDns = _selectedRemoteDeviceDns;
     final tailscaleSshSupportedHere = !Platform.isWindows;
-    final lastUpdatedText = _lastUpdated == null
-        ? 'Not yet'
-        : _lastUpdated!.toLocal().toIso8601String().replaceFirst('T', ' ');
+    final lastUpdatedText = _formatDateTime(_lastUpdated);
+
+    final sectionCards = <Widget>[];
+    switch (_activeSection) {
+      case _DashboardSection.overview:
+        sectionCards.add(_buildOverviewCard(context));
+        sectionCards.add(_buildInfoCard(context));
+      case _DashboardSection.remote:
+        sectionCards.add(
+          _buildRemoteRunnerCard(
+            context: context,
+            remoteCandidates: remoteCandidates,
+            selectedRemoteDns: selectedRemoteDns,
+          ),
+        );
+      case _DashboardSection.access:
+        sectionCards.add(
+          _buildAccessCard(
+            context: context,
+            tailscaleSshSupportedHere: tailscaleSshSupportedHere,
+          ),
+        );
+        sectionCards.add(_buildAutomationCard(context));
+      case _DashboardSection.devices:
+        sectionCards.add(
+          _buildDevicesCard(context: context, snapshot: snapshot),
+        );
+      case _DashboardSection.logs:
+        sectionCards.add(
+          _buildLogsCard(
+            context: context,
+            title: 'Command output',
+            text: _latestCommandOutput,
+            emptyText: 'No command run yet.',
+            showProgress: _loadingStatus || _runningAction,
+          ),
+        );
+        sectionCards.add(
+          _buildLogsCard(
+            context: context,
+            title: 'Remote runner output',
+            text: _remoteLiveOutput,
+            emptyText: 'No remote command run yet.',
+            showProgress: _runningRemoteCommand || _detectingRemoteUser,
+          ),
+        );
+        sectionCards.add(_buildInfoCard(context));
+    }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('ScaleServe Tailscale Controller')),
+      appBar: AppBar(
+        title: const Text('ScaleServe Tailscale Controller'),
+        actions: [
+          if (widget.signedInUser != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(999),
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.7),
+                  ),
+                  child: Text('User: ${widget.signedInUser!.username}'),
+                ),
+              ),
+            ),
+          if (widget.onLogout != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: TextButton.icon(
+                onPressed: widget.onLogout,
+                icon: const Icon(Icons.logout),
+                label: const Text('Sign out'),
+              ),
+            ),
+        ],
+      ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 900),
+          constraints: const BoxConstraints(maxWidth: 1080),
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(Icons.circle, size: 12, color: stateColor),
-                            const SizedBox(width: 8),
-                            Text(
-                              'State: $stateText',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Text('Device: ${snapshot?.selfName ?? 'Unknown'}'),
-                        Text('User: ${snapshot?.loginName ?? 'Unknown'}'),
-                        Text('Tailnet: ${snapshot?.tailnetName ?? 'Unknown'}'),
-                        Text(
-                          'Tailnet DNS: ${snapshot?.magicDnsSuffix ?? 'Unknown'}',
-                        ),
-                        Text('Last updated: $lastUpdatedText'),
-                        const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _refreshStatus(showLoader: true),
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Refresh status'),
-                            ),
-                            FilledButton.icon(
-                              onPressed: _isBusy ? null : _toggleConnection,
-                              icon: Icon(
-                                connected ? Icons.power_off : Icons.power,
-                              ),
-                              label: Text(connected ? 'Disconnect' : 'Connect'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _runAction(
-                                      successMessage: 'Tailscale connected.',
-                                      action: () => widget.service.connect(),
-                                    ),
-                              icon: const Icon(Icons.link),
-                              label: const Text('Run tailscale up'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _runAction(
-                                      successMessage: 'Tailscale disconnected.',
-                                      action: widget.service.disconnect,
-                                    ),
-                              icon: const Icon(Icons.link_off),
-                              label: const Text('Run tailscale down'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                _buildStatusCard(
+                  context: context,
+                  snapshot: snapshot,
+                  connected: connected,
+                  stateText: stateText,
+                  stateColor: stateColor,
+                  lastUpdatedText: lastUpdatedText,
                 ),
                 const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Remote Compute Runner',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Run a shell command on a selected tailnet device through SSH. '
-                          'Save per-device user/key defaults and keep execution history.',
-                        ),
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.black12),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'SSH Access Setup',
-                                style: Theme.of(context).textTheme.titleSmall,
-                              ),
-                              const SizedBox(height: 6),
-                              Text(_sshKeyStatusText),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 10,
-                                runSpacing: 10,
-                                children: [
-                                  FilledButton.icon(
-                                    onPressed: _generatingSshKey
-                                        ? null
-                                        : _generateSshKeyPair,
-                                    icon: const Icon(Icons.key),
-                                    label: Text(
-                                      _sshPublicKey.isEmpty
-                                          ? 'Generate SSH Key'
-                                          : 'Regenerate / Ensure Key',
-                                    ),
-                                  ),
-                                  OutlinedButton.icon(
-                                    onPressed: _sshPublicKey.isEmpty
-                                        ? null
-                                        : _copyPublicKey,
-                                    icon: const Icon(Icons.copy),
-                                    label: const Text('Copy Public Key'),
-                                  ),
-                                  OutlinedButton.icon(
-                                    onPressed: _sshPublicKey.isEmpty
-                                        ? null
-                                        : _copyTargetSshBootstrapCommand,
-                                    icon: const Icon(Icons.terminal),
-                                    label: const Text('Copy SSH Setup Command'),
-                                  ),
-                                  OutlinedButton.icon(
-                                    onPressed:
-                                        _runningRemoteCommand ||
-                                            _detectingRemoteUser
-                                        ? null
-                                        : _installPublicKeyOnRemote,
-                                    icon: const Icon(
-                                      Icons.published_with_changes,
-                                    ),
-                                    label: const Text('Install Key On Remote'),
-                                  ),
-                                  OutlinedButton.icon(
-                                    onPressed:
-                                        _runningRemoteCommand ||
-                                            _detectingRemoteUser
-                                        ? null
-                                        : _detectRemoteSshUser,
-                                    icon: const Icon(Icons.person_search),
-                                    label: Text(
-                                      _detectingRemoteUser
-                                          ? 'Detecting...'
-                                          : 'Detect SSH User',
-                                    ),
-                                  ),
-                                  OutlinedButton.icon(
-                                    onPressed:
-                                        _runningRemoteCommand ||
-                                            _detectingRemoteUser
-                                        ? null
-                                        : _testSshAccess,
-                                    icon: const Icon(Icons.verified_user),
-                                    label: const Text('Test SSH Access'),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Run the copied SSH setup command on the target machine once. '
-                                'For Linux/macOS, it updates ~/.ssh/authorized_keys. '
-                                'For Windows, it updates authorized_keys with UTF-8 encoding, '
-                                'fixes ACLs, and refreshes sshd (with admin-file fallback). '
-                                'Or use Install Key On Remote if you can already SSH in with an existing key. '
-                                'Then use Detect SSH User to auto-fill the working login name.',
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          initialValue:
-                              (selectedRemoteDns != null &&
-                                  remoteCandidates.any(
-                                    (peer) =>
-                                        peer.normalizedDnsName ==
-                                        selectedRemoteDns,
-                                  ))
-                              ? selectedRemoteDns
-                              : null,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'Target device',
-                          ),
-                          items: remoteCandidates
-                              .map(
-                                (peer) => DropdownMenuItem<String>(
-                                  value: peer.normalizedDnsName,
-                                  child: Text(
-                                    '${peer.name} (${peer.normalizedDnsName})',
-                                  ),
-                                ),
-                              )
-                              .toList(),
-                          onChanged:
-                              _runningRemoteCommand || _detectingRemoteUser
-                              ? null
-                              : (value) => _selectRemoteDevice(value),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _remoteUserController,
-                          enabled:
-                              !_runningRemoteCommand && !_detectingRemoteUser,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'Remote SSH user',
-                            hintText: 'ubuntu / opc / ec2-user',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _remoteKeyPathController,
-                          enabled:
-                              !_runningRemoteCommand && !_detectingRemoteUser,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'SSH key path (optional)',
-                            hintText: '~/.ssh/id_ed25519',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _bootstrapKeyPathController,
-                          enabled:
-                              !_runningRemoteCommand && !_detectingRemoteUser,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'Bootstrap key path (first-time setup)',
-                            hintText: '~/.ssh/oracle_server_key.pem',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _remoteCommandController,
-                          enabled:
-                              !_runningRemoteCommand && !_detectingRemoteUser,
-                          minLines: 2,
-                          maxLines: 4,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'Remote command',
-                            hintText:
-                                'cd /path/to/project && python3 script.py',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.black12),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Run Local File On Remote Compute',
-                                style: Theme.of(context).textTheme.titleSmall,
-                              ),
-                              const SizedBox(height: 6),
-                              const Text(
-                                'Streams a local file over SSH stdin so it runs on remote CPU '
-                                'without a permanent upload.',
-                              ),
-                              const SizedBox(height: 10),
-                              TextField(
-                                controller: _localStreamFilePathController,
-                                enabled:
-                                    !_runningRemoteCommand &&
-                                    !_detectingRemoteUser,
-                                decoration: const InputDecoration(
-                                  border: OutlineInputBorder(),
-                                  labelText: 'Local file path to stream',
-                                  hintText: '/Users/you/path/script.py',
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              TextField(
-                                controller: _remoteStdinCommandController,
-                                enabled:
-                                    !_runningRemoteCommand &&
-                                    !_detectingRemoteUser,
-                                decoration: const InputDecoration(
-                                  border: OutlineInputBorder(),
-                                  labelText: 'Remote command (reads stdin)',
-                                  hintText: 'python3 -',
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              CheckboxListTile(
-                                contentPadding: EdgeInsets.zero,
-                                controlAffinity:
-                                    ListTileControlAffinity.leading,
-                                value:
-                                    _enableInteractiveInputForWindowsStreamRuns,
-                                onChanged:
-                                    _runningRemoteCommand ||
-                                        _detectingRemoteUser
-                                    ? null
-                                    : (value) {
-                                        setState(() {
-                                          _enableInteractiveInputForWindowsStreamRuns =
-                                              value ?? true;
-                                        });
-                                      },
-                                title: const Text(
-                                  'Enable interactive input() support for Windows py - stream runs',
-                                ),
-                                subtitle: const Text(
-                                  'Uses a temporary remote file and keeps stdin open so you can send answers while running.',
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              CheckboxListTile(
-                                contentPadding: EdgeInsets.zero,
-                                controlAffinity:
-                                    ListTileControlAffinity.leading,
-                                value: _autoKillWindowsPythonAfterStreamRun,
-                                onChanged:
-                                    _runningRemoteCommand ||
-                                        _detectingRemoteUser
-                                    ? null
-                                    : (value) {
-                                        setState(() {
-                                          _autoKillWindowsPythonAfterStreamRun =
-                                              value ?? true;
-                                        });
-                                      },
-                                title: const Text(
-                                  'Auto-clean matched python/py process after stream run on Windows',
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              TextField(
-                                controller: _windowsCleanupPatternController,
-                                enabled:
-                                    !_runningRemoteCommand &&
-                                    !_detectingRemoteUser,
-                                decoration: const InputDecoration(
-                                  border: OutlineInputBorder(),
-                                  labelText:
-                                      'Windows cleanup match (command line contains)',
-                                  hintText: 'scaleserve_stream',
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              FilledButton.icon(
-                                onPressed:
-                                    _runningRemoteCommand ||
-                                        _detectingRemoteUser
-                                    ? null
-                                    : _runLocalFileOnRemoteCompute,
-                                icon: const Icon(Icons.upload_file),
-                                label: const Text('Stream Local File And Run'),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            FilledButton.icon(
-                              onPressed:
-                                  _runningRemoteCommand || _detectingRemoteUser
-                                  ? null
-                                  : _runRemoteCommand,
-                              icon: const Icon(Icons.play_arrow),
-                              label: const Text('Run On Selected Device'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed:
-                                  _runningRemoteCommand || _detectingRemoteUser
-                                  ? null
-                                  : () => _saveRemoteProfile(showMessage: true),
-                              icon: const Icon(Icons.save),
-                              label: const Text('Save Device Profile'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed:
-                                  _runningRemoteCommand &&
-                                      _activeRemoteSshProcess != null
-                                  ? _stopRunningRemoteCommand
-                                  : null,
-                              icon: const Icon(Icons.stop_circle_outlined),
-                              label: const Text('Stop Running Command'),
-                            ),
-                            TextButton(
-                              onPressed:
-                                  _runningRemoteCommand ||
-                                      _detectingRemoteUser ||
-                                      _remoteExecutionHistory.isEmpty
-                                  ? null
-                                  : _clearRemoteHistory,
-                              child: const Text('Clear Run History'),
-                            ),
-                          ],
-                        ),
-                        if (_runningRemoteCommand &&
-                            _activeRunSupportsRuntimeInput) ...[
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: _runtimeInputController,
-                            enabled: _activeRemoteSshProcess != null,
-                            onSubmitted: _activeRemoteSshProcess == null
-                                ? null
-                                : (_) => _sendRuntimeInputLine(),
-                            decoration: const InputDecoration(
-                              border: OutlineInputBorder(),
-                              labelText: 'Runtime input',
-                              hintText:
-                                  'Type a reply for input() and press Send',
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              FilledButton.icon(
-                                onPressed: _activeRemoteSshProcess == null
-                                    ? null
-                                    : _sendRuntimeInputLine,
-                                icon: const Icon(Icons.send),
-                                label: const Text('Send Input'),
-                              ),
-                              OutlinedButton.icon(
-                                onPressed: _activeRemoteSshProcess == null
-                                    ? null
-                                    : _sendRuntimeInputEof,
-                                icon: const Icon(Icons.subdirectory_arrow_left),
-                                label: const Text('Send EOF'),
-                              ),
-                            ],
-                          ),
-                        ],
-                        const SizedBox(height: 10),
-                        if (_runningRemoteCommand || _detectingRemoteUser)
-                          const LinearProgressIndicator(),
-                        const SizedBox(height: 8),
-                        SelectableText(_remoteLiveOutput),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Run history',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        const SizedBox(height: 8),
-                        if (_remoteExecutionHistory.isEmpty)
-                          const Text('No remote commands run yet.')
-                        else
-                          ..._remoteExecutionHistory
-                              .take(8)
-                              .map(
-                                (record) => ListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Icon(
-                                    record.success
-                                        ? Icons.check_circle
-                                        : Icons.error_outline,
-                                    color: record.success
-                                        ? Colors.green
-                                        : Colors.red,
-                                  ),
-                                  title: Text(
-                                    '${record.user}@${record.deviceDnsName}',
-                                  ),
-                                  subtitle: Text(
-                                    '${record.command}\n${_historyTime(record.startedAtIso)}  •  exit ${record.exitCode}',
-                                  ),
-                                  isThreeLine: true,
-                                ),
-                              ),
-                      ],
-                    ),
-                  ),
+                _buildSectionSelector(context),
+                const SizedBox(height: 12),
+                Text(
+                  _activeSection.label,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _sectionDescription(_activeSection),
+                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
                 const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Re-auth / Switch Tailnet',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Tailscale keeps one active connection per device. '
-                          'This action re-authenticates this device or switches to another tailnet. '
-                          'Use an auth key from a different tailnet to actually switch.',
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          tailscaleSshSupportedHere
-                              ? 'On a new laptop, use the one-click setup button below to join this tailnet with SSH enabled.'
-                              : 'On Windows, one-click setup joins the tailnet, but skips --ssh because Tailscale SSH server is not supported on Windows.',
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _authKeyController,
-                          enabled: !_isBusy,
-                          obscureText: true,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            labelText: 'Auth key (optional)',
-                            hintText: 'tskey-...',
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          controlAffinity: ListTileControlAffinity.leading,
-                          title: const Text(
-                            'Remember auth key on this computer',
-                          ),
-                          value: _rememberAuthKey,
-                          onChanged: _isBusy
-                              ? null
-                              : (value) {
-                                  setState(() {
-                                    _rememberAuthKey = value ?? false;
-                                  });
-                                },
-                        ),
-                        CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          controlAffinity: ListTileControlAffinity.leading,
-                          title: const Text(
-                            'Auto-connect on app launch with saved key',
-                          ),
-                          value: _autoConnectOnLaunch,
-                          onChanged: _isBusy
-                              ? null
-                              : (value) {
-                                  setState(() {
-                                    _autoConnectOnLaunch = value ?? false;
-                                  });
-                                },
-                        ),
-                        CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          controlAffinity: ListTileControlAffinity.leading,
-                          title: Text(
-                            tailscaleSshSupportedHere
-                                ? 'Enable Tailscale SSH during one-click setup'
-                                : 'Enable Tailscale SSH during one-click setup (not supported on Windows)',
-                          ),
-                          value:
-                              tailscaleSshSupportedHere &&
-                              _setupEnableTailscaleSsh,
-                          onChanged: _isBusy || !tailscaleSshSupportedHere
-                              ? null
-                              : (value) {
-                                  setState(() {
-                                    _setupEnableTailscaleSsh = value ?? true;
-                                  });
-                                },
-                        ),
-                        Row(
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed: _isBusy ? null : _saveKeyPreferences,
-                              icon: const Icon(Icons.save),
-                              label: const Text('Save key preferences'),
-                            ),
-                            const SizedBox(width: 10),
-                            TextButton(
-                              onPressed: _isBusy || !_hasStoredKey
-                                  ? null
-                                  : _clearSavedKey,
-                              child: const Text('Clear saved key'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: _isBusy ? null : _connectNewSession,
-                              icon: const Icon(Icons.add_link),
-                              label: const Text('Re-authenticate'),
-                            ),
-                            FilledButton.icon(
-                              onPressed: _isBusy ? null : _setupThisLaptop,
-                              icon: const Icon(Icons.rocket_launch),
-                              label: const Text('One-Click Setup This Laptop'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Automation',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'No shared Gmail needed. Install Tailscale on each PC and run one of these join commands '
-                          'to connect devices to the same tailnet.',
-                        ),
-                        const SizedBox(height: 10),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _copyToClipboard(
-                                      text: _macJoinCommand(),
-                                      successMessage:
-                                          'Copied macOS join command.',
-                                    ),
-                              icon: const Icon(Icons.desktop_mac),
-                              label: const Text('Copy macOS join command'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _copyToClipboard(
-                                      text: _windowsJoinCommand(),
-                                      successMessage:
-                                          'Copied Windows join command.',
-                                    ),
-                              icon: const Icon(Icons.desktop_windows),
-                              label: const Text('Copy Windows join command'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _isBusy
-                                  ? null
-                                  : () => _copyToClipboard(
-                                      text: _linuxJoinCommand(),
-                                      successMessage:
-                                          'Copied Linux join command.',
-                                    ),
-                              icon: const Icon(Icons.computer),
-                              label: const Text('Copy Linux join command'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'If auth key field is blank, copied command will include tskey-REPLACE_ME placeholder.',
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Connected devices',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 10),
-                        if (snapshot == null || snapshot.peers.isEmpty)
-                          const Text('No peers found from current status.')
-                        else ...[
-                          ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            leading: const Icon(
-                              Icons.laptop_mac,
-                              color: Colors.blueGrey,
-                            ),
-                            title: Text('${snapshot.selfName} (This device)'),
-                            subtitle: Text(
-                              '${snapshot.selfIpAddress}  •  ${snapshot.selfDnsName}',
-                            ),
-                          ),
-                          ...snapshot.peers.map(
-                            (peer) => ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              leading: Icon(
-                                peer.online
-                                    ? Icons.check_circle
-                                    : Icons.remove_circle_outline,
-                                color: peer.online ? Colors.green : Colors.grey,
-                              ),
-                              title: Text(peer.name),
-                              subtitle: Text(
-                                '${peer.ipAddress}  •  ${peer.normalizedDnsName}  •  ${peer.os}',
-                              ),
-                              trailing: PopupMenuButton<String>(
-                                tooltip: 'Device actions',
-                                onSelected: (value) => _handlePeerMenuAction(
-                                  peer: peer,
-                                  action: value,
-                                ),
-                                itemBuilder: (context) => const [
-                                  PopupMenuItem(
-                                    value: 'select_remote',
-                                    child: Text('Use in Remote Runner'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'ping_now',
-                                    child: Text('Ping now'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'copy_ping',
-                                    child: Text('Copy ping command'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'copy_ssh',
-                                    child: Text('Copy SSH command template'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Command output',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 8),
-                        if (_loadingStatus || _runningAction)
-                          const LinearProgressIndicator(),
-                        const SizedBox(height: 8),
-                        SelectableText(
-                          _latestCommandOutput.isEmpty
-                              ? 'No command run yet.'
-                              : _latestCommandOutput,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(_infoMessage),
+                for (var i = 0; i < sectionCards.length; i++) ...[
+                  sectionCards[i],
+                  if (i != sectionCards.length - 1) const SizedBox(height: 16),
+                ],
               ],
             ),
           ),

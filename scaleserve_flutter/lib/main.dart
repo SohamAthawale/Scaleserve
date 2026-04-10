@@ -50,6 +50,36 @@ extension on _DashboardSection {
   }
 }
 
+class _RemoteCommandPreset {
+  const _RemoteCommandPreset({
+    required this.id,
+    required this.label,
+    required this.description,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+}
+
+class _StreamCommandPreset {
+  const _StreamCommandPreset({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.posixCommand,
+    required this.windowsCommand,
+    this.supportsInteractiveInput = false,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+  final String posixCommand;
+  final String windowsCommand;
+  final bool supportsInteractiveInput;
+}
+
 class ScaleServeApp extends StatefulWidget {
   const ScaleServeApp({
     super.key,
@@ -1068,6 +1098,93 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     'fedora',
     'root',
   ];
+  static const List<_RemoteCommandPreset> _remoteCommandPresetCatalog =
+      <_RemoteCommandPreset>[
+        _RemoteCommandPreset(
+          id: 'custom',
+          label: 'Custom command',
+          description:
+              'Type any command manually (shell, Python, Node, Docker, etc.).',
+        ),
+        _RemoteCommandPreset(
+          id: 'system_probe',
+          label: 'System probe',
+          description:
+              'Quick OS + runtime diagnostics (uname/version/python/node).',
+        ),
+        _RemoteCommandPreset(
+          id: 'gpu_inventory',
+          label: 'GPU inventory',
+          description:
+              'Checks NVIDIA/AMD GPU tooling and prints available GPU details.',
+        ),
+        _RemoteCommandPreset(
+          id: 'gpu_quick_check',
+          label: 'GPU quick check',
+          description:
+              'Fast compatibility check for CUDA toolchain and GPU visibility.',
+        ),
+        _RemoteCommandPreset(
+          id: 'ollama_health',
+          label: 'Ollama health',
+          description:
+              'Checks Ollama version and local Ollama API tags endpoint.',
+        ),
+        _RemoteCommandPreset(
+          id: 'ollama_generate',
+          label: 'Ollama test generate',
+          description:
+              'Runs a quick local generation test (model may auto-download).',
+        ),
+        _RemoteCommandPreset(
+          id: 'openai_api_smoke',
+          label: 'LLM API smoke test',
+          description:
+              'Calls OpenAI models endpoint using OPENAI_API_KEY on target.',
+        ),
+      ];
+  static const List<_StreamCommandPreset>
+  _streamCommandPresetCatalog = <_StreamCommandPreset>[
+    _StreamCommandPreset(
+      id: 'python_stdin',
+      label: 'Python (stdin)',
+      description:
+          'Streams local file into Python interpreter on target machine.',
+      posixCommand: 'python3 -',
+      windowsCommand: 'py -',
+      supportsInteractiveInput: true,
+    ),
+    _StreamCommandPreset(
+      id: 'bash_stdin',
+      label: 'Bash (stdin)',
+      description: 'Streams local file into bash shell (good for .sh scripts).',
+      posixCommand: 'bash -s',
+      windowsCommand: 'bash -s',
+    ),
+    _StreamCommandPreset(
+      id: 'sh_stdin',
+      label: 'POSIX sh (stdin)',
+      description: 'Streams local file into /bin/sh-compatible shell.',
+      posixCommand: 'sh -s',
+      windowsCommand: 'sh -s',
+    ),
+    _StreamCommandPreset(
+      id: 'node_stdin',
+      label: 'Node.js (stdin)',
+      description:
+          'Streams local file directly into Node.js runtime on target.',
+      posixCommand: 'node -',
+      windowsCommand: 'node -',
+    ),
+    _StreamCommandPreset(
+      id: 'powershell_stdin',
+      label: 'PowerShell (stdin)',
+      description:
+          'Streams local file into PowerShell (Windows: powershell, POSIX: pwsh).',
+      posixCommand: 'pwsh -NoProfile -Command -',
+      windowsCommand: 'powershell -NoProfile -Command -',
+    ),
+  ];
 
   final LocalSettingsStore _settingsStore = LocalSettingsStore();
   final RemoteComputeStore _remoteComputeStore = RemoteComputeStore();
@@ -1113,6 +1230,8 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   bool _activeRunSupportsRuntimeInput = false;
   bool _showRemoteAdvancedOptions = false;
   bool _showRemoteStreamOptions = false;
+  String _selectedRemoteCommandPresetId = 'custom';
+  String _selectedStreamCommandPresetId = 'python_stdin';
   _DashboardSection _activeSection = _DashboardSection.overview;
   String _deviceSearchQuery = '';
 
@@ -1914,6 +2033,131 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     return 'target';
   }
 
+  _RemoteCommandPreset _remoteCommandPresetById(String id) {
+    for (final preset in _remoteCommandPresetCatalog) {
+      if (preset.id == id) {
+        return preset;
+      }
+    }
+    return _remoteCommandPresetCatalog.first;
+  }
+
+  _StreamCommandPreset _streamCommandPresetById(String id) {
+    for (final preset in _streamCommandPresetCatalog) {
+      if (preset.id == id) {
+        return preset;
+      }
+    }
+    return _streamCommandPresetCatalog.first;
+  }
+
+  String _remoteCommandForPreset({
+    required String presetId,
+    required TailscalePeer? peer,
+  }) {
+    final windows = _isWindowsPeer(peer);
+    switch (presetId) {
+      case 'system_probe':
+        if (windows) {
+          return r'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,OSArchitecture; if (Get-Command py -ErrorAction SilentlyContinue) { py --version }; if (Get-Command python -ErrorAction SilentlyContinue) { python --version }; if (Get-Command node -ErrorAction SilentlyContinue) { node --version }; if (Get-Command docker -ErrorAction SilentlyContinue) { docker --version }"';
+        }
+        return "bash -lc 'uname -a; (python3 --version || python --version || true); (node --version || true); (docker --version || true)'";
+      case 'gpu_inventory':
+        if (windows) {
+          return r'powershell -NoProfile -NonInteractive -Command "if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { nvidia-smi } elseif (Get-Command rocm-smi -ErrorAction SilentlyContinue) { rocm-smi } else { Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM | Format-Table -AutoSize }"';
+        }
+        return "bash -lc 'if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi; elif command -v rocm-smi >/dev/null 2>&1; then rocm-smi; elif [ \"\$(uname -s)\" = \"Darwin\" ]; then system_profiler SPDisplaysDataType; else (lspci 2>/dev/null | grep -Ei \"vga|3d|display|nvidia|amd\") || echo \"No GPU tool found\"; fi'";
+      case 'gpu_quick_check':
+        if (windows) {
+          return r'powershell -NoProfile -NonInteractive -Command "if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader } else { Write-Host '
+              'nvidia-smi not found'
+              ' }; if (Get-Command nvcc -ErrorAction SilentlyContinue) { nvcc --version } else { Write-Host '
+              'nvcc not found'
+              ' }"';
+        }
+        return "bash -lc '(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader) || echo \"nvidia-smi not found\"; (command -v nvcc >/dev/null 2>&1 && nvcc --version) || echo \"nvcc not found\"'";
+      case 'ollama_health':
+        if (windows) {
+          return r'powershell -NoProfile -NonInteractive -Command "ollama --version; try { (Invoke-RestMethod -Uri http://127.0.0.1:11434/api/tags -Method Get | ConvertTo-Json -Depth 6) } catch { Write-Host $_.Exception.Message; exit 1 }"';
+        }
+        return "bash -lc 'ollama --version && curl -sS http://127.0.0.1:11434/api/tags || echo \"Ollama API unavailable on :11434\"'";
+      case 'ollama_generate':
+        return 'ollama run llama3.2:3b "Say hello from ScaleServe and include GPU status if available."';
+      case 'openai_api_smoke':
+        if (windows) {
+          return "powershell -NoProfile -NonInteractive -Command \"\$k=\$env:OPENAI_API_KEY; if (-not \$k) { Write-Host \\\"Set OPENAI_API_KEY first\\\"; exit 1 }; \$h=@{Authorization=(\\\"Bearer \\\" + \$k)}; Invoke-RestMethod -Method Get -Uri https://api.openai.com/v1/models -Headers \$h | ConvertTo-Json -Depth 4\"";
+        }
+        return "bash -lc 'if [ -z \"\$OPENAI_API_KEY\" ]; then echo \"Set OPENAI_API_KEY first\"; exit 1; fi; curl -sS https://api.openai.com/v1/models -H \"Authorization: Bearer \$OPENAI_API_KEY\" | head -c 1200'";
+      case 'custom':
+      default:
+        return '';
+    }
+  }
+
+  String _streamCommandForPreset({
+    required String presetId,
+    required TailscalePeer? peer,
+  }) {
+    final preset = _streamCommandPresetById(presetId);
+    return _isWindowsPeer(peer) ? preset.windowsCommand : preset.posixCommand;
+  }
+
+  void _applySelectedRemoteCommandPreset({required bool showMessage}) {
+    final preset = _remoteCommandPresetById(_selectedRemoteCommandPresetId);
+    if (preset.id == 'custom') {
+      if (!showMessage || !mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage =
+            'Custom command mode selected. Edit the command field directly.';
+      });
+      return;
+    }
+
+    final peer = _peerByDnsName(_selectedRemoteDeviceDns ?? '');
+    final command = _remoteCommandForPreset(presetId: preset.id, peer: peer);
+    if (command.isEmpty) {
+      if (!showMessage || !mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage =
+            'Could not build preset command for ${_targetOsLabel(peer)} target.';
+      });
+      return;
+    }
+
+    setState(() {
+      _remoteCommandController.text = command;
+      _infoMessage =
+          'Applied preset "${preset.label}" for ${_targetOsLabel(peer)}.';
+    });
+  }
+
+  Future<void> _runSelectedRemoteCommandPreset() async {
+    if (_selectedRemoteCommandPresetId != 'custom') {
+      _applySelectedRemoteCommandPreset(showMessage: false);
+    }
+    await _runRemoteCommand();
+  }
+
+  void _applySelectedStreamCommandPreset({required bool showMessage}) {
+    final peer = _peerByDnsName(_selectedRemoteDeviceDns ?? '');
+    final preset = _streamCommandPresetById(_selectedStreamCommandPresetId);
+    final command = _streamCommandForPreset(presetId: preset.id, peer: peer);
+    setState(() {
+      _remoteStdinCommandController.text = command;
+      if (!preset.supportsInteractiveInput) {
+        _enableInteractiveInputForPythonStreamRuns = false;
+      }
+      if (showMessage) {
+        _infoMessage =
+            'Applied stream preset "${preset.label}" for ${_targetOsLabel(peer)}.';
+      }
+    });
+  }
+
   Future<void> _copyTargetSshBootstrapCommand() async {
     final peer = _peerByDnsName(_selectedRemoteDeviceDns ?? '');
     final command = _targetSshSetupCommandForPeer(peer);
@@ -2639,6 +2883,14 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
 
     final target = '$user@$dnsName';
     final sshArgs = <String>[
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'NumberOfPasswordPrompts=0',
+      '-o',
+      'ConnectTimeout=8',
+      '-o',
+      'StrictHostKeyChecking=accept-new',
       if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
       target,
       remoteCommand,
@@ -2648,6 +2900,10 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     if (keyPath.isNotEmpty) {
       safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
     }
+    safeCommand.write(
+      '-o BatchMode=yes -o NumberOfPasswordPrompts=0 '
+      '-o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new ',
+    );
     safeCommand.write('$target $remoteCommand');
     final startedAt = DateTime.now().toUtc();
 
@@ -2799,17 +3055,21 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     final user = _remoteUserController.text.trim();
     final keyPath = _remoteKeyPathController.text.trim();
     final localFilePath = _localStreamFilePathController.text.trim();
-    final remoteStdinCommand = _remoteStdinCommandController.text.trim().isEmpty
-        ? 'python3 -'
-        : _remoteStdinCommandController.text.trim();
-    final windowsCleanupPattern = _windowsCleanupPatternController.text.trim();
-
     if (dnsName == null || dnsName.isEmpty) {
       setState(() {
         _infoMessage = 'Select a remote device first.';
       });
       return;
     }
+
+    final peer = _peerByDnsName(dnsName);
+    final remoteStdinCommand = _remoteStdinCommandController.text.trim().isEmpty
+        ? _streamCommandForPreset(
+            presetId: _selectedStreamCommandPresetId,
+            peer: peer,
+          )
+        : _remoteStdinCommandController.text.trim();
+    final windowsCleanupPattern = _windowsCleanupPatternController.text.trim();
 
     if (user.isEmpty) {
       setState(() {
@@ -2825,7 +3085,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       return;
     }
 
-    final peer = _peerByDnsName(dnsName);
     final isWindowsTarget = (peer?.os ?? '').toLowerCase().contains('windows');
 
     final localFile = File(localFilePath);
@@ -3745,6 +4004,12 @@ raise SystemExit(rc)
     final selectedPeer = _peerByDnsName(selectedRemoteDns ?? '');
     final setupCommandLabel = _targetSshDoctorButtonLabel(selectedPeer);
     final setupTip = _targetSshDoctorTip(selectedPeer);
+    final selectedCommandPreset = _remoteCommandPresetById(
+      _selectedRemoteCommandPresetId,
+    );
+    final selectedStreamPreset = _streamCommandPresetById(
+      _selectedStreamCommandPresetId,
+    );
 
     return Card(
       child: Padding(
@@ -3862,6 +4127,59 @@ raise SystemExit(rc)
                 labelText: 'Remote command',
                 hintText: 'cd /path/to/project && python3 script.py',
               ),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedRemoteCommandPresetId,
+              decoration: const InputDecoration(
+                labelText: 'Command preset (GPU + LLM ready)',
+              ),
+              items: _remoteCommandPresetCatalog
+                  .map(
+                    (preset) => DropdownMenuItem<String>(
+                      value: preset.id,
+                      child: Text(preset.label),
+                    ),
+                  )
+                  .toList(),
+              onChanged: _runningRemoteCommand || _detectingRemoteUser
+                  ? null
+                  : (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      setState(() {
+                        _selectedRemoteCommandPresetId = value;
+                      });
+                    },
+            ),
+            const SizedBox(height: 6),
+            Text(
+              selectedCommandPreset.description,
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : () => _applySelectedRemoteCommandPreset(
+                          showMessage: true,
+                        ),
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Apply Preset'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : _runSelectedRemoteCommandPreset,
+                  icon: const Icon(Icons.bolt),
+                  label: const Text('Run Selected Preset'),
+                ),
+              ],
             ),
             const SizedBox(height: 10),
             Wrap(
@@ -3985,6 +4303,47 @@ raise SystemExit(rc)
               },
               children: [
                 const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  initialValue: _selectedStreamCommandPresetId,
+                  decoration: const InputDecoration(
+                    labelText: 'Stream mode preset',
+                  ),
+                  items: _streamCommandPresetCatalog
+                      .map(
+                        (preset) => DropdownMenuItem<String>(
+                          value: preset.id,
+                          child: Text(preset.label),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : (value) {
+                          if (value == null) {
+                            return;
+                          }
+                          setState(() {
+                            _selectedStreamCommandPresetId = value;
+                          });
+                          _applySelectedStreamCommandPreset(showMessage: false);
+                        },
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  selectedStreamPreset.description,
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                      ? null
+                      : () => _applySelectedStreamCommandPreset(
+                          showMessage: true,
+                        ),
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Apply Stream Preset'),
+                ),
+                const SizedBox(height: 10),
                 TextField(
                   controller: _localStreamFilePathController,
                   enabled: !_runningRemoteCommand && !_detectingRemoteUser,
@@ -3999,7 +4358,8 @@ raise SystemExit(rc)
                   enabled: !_runningRemoteCommand && !_detectingRemoteUser,
                   decoration: const InputDecoration(
                     labelText: 'Remote command (reads stdin)',
-                    hintText: 'python3 -',
+                    hintText:
+                        'python3 - / bash -s / node - / powershell -Command -',
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -4016,7 +4376,7 @@ raise SystemExit(rc)
                           });
                         },
                   title: const Text(
-                    'Enable interactive input() support for python - stream runs',
+                    'Enable interactive input() for Python stream runs only',
                   ),
                   subtitle: const Text(
                     'Keeps stdin open so you can answer prompts while running (can wait until you send EOF).',

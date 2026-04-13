@@ -17,7 +17,8 @@ Cross-platform Flutter desktop app to control Tailscale on macOS and Windows.
 - Run remote SSH commands on selected tailnet devices with saved profiles
 - Generate SSH keypair, copy target-OS SSH bootstrap command, and auto-detect working SSH user
 - Install your ScaleServe SSH public key on a remote target directly from the app using an existing bootstrap key
-- Stream a local file over SSH stdin and execute it on remote compute without permanent upload
+- Stream local files over SSH stdin into Python, shell, Node.js, PowerShell, Ruby, Perl, or any custom stdin-reading command without permanent upload
+- Built-in command presets for GPU checks, PyTorch/CUDA visibility, Ollama, OpenAI API calls, and local OpenAI-compatible endpoints
 - Optional targeted auto-cleanup for Windows stream runs (kills only matching `python.exe`/`py.exe` command lines)
 - Stop an in-progress remote SSH run directly from the app
 - Track remote command history in-app

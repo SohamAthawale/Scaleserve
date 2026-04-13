@@ -161,8 +161,9 @@ In `Remote Runner`:
 ### C) Execute workload
 
 - Run direct command: `Run On Selected Device`
-- Stream local script: `Stream Local File And Run`
-- Optional interactive stdin + stop control + Windows cleanup
+- Use command presets for shell, GPU checks, Ollama, OpenAI, and local OpenAI-compatible endpoints
+- Stream local files/scripts into Python, bash, sh, Node.js, PowerShell, Ruby, Perl, or any custom stdin-reading command
+- Optional Python interactive stdin + stop control + Windows cleanup
 
 ## 8. Backend API Endpoints
 

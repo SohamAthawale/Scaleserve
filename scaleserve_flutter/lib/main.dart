@@ -80,6 +80,102 @@ class _StreamCommandPreset {
   final bool supportsInteractiveInput;
 }
 
+class _RemoteMultiRunFileEntry {
+  _RemoteMultiRunFileEntry({
+    required this.id,
+  }) : filePathController = TextEditingController(),
+       remoteCommandController = TextEditingController(),
+       windowsCleanupPatternController = TextEditingController(
+         text: 'scaleserve_stream',
+       ),
+       runtimeInputController = TextEditingController();
+
+  final String id;
+  final TextEditingController filePathController;
+  final TextEditingController remoteCommandController;
+  final TextEditingController windowsCleanupPatternController;
+  final TextEditingController runtimeInputController;
+  String selectedStreamPresetId = 'custom_stdin';
+  String output = '';
+  String statusText = 'Idle';
+  bool isRunning = false;
+  bool stopRequested = false;
+  bool enableInteractiveInputForPythonStreamRuns = false;
+  bool autoKillWindowsPythonAfterStreamRun = true;
+  bool activeRunSupportsRuntimeInput = false;
+  Process? activeProcess;
+
+  void dispose() {
+    filePathController.dispose();
+    remoteCommandController.dispose();
+    windowsCleanupPatternController.dispose();
+    runtimeInputController.dispose();
+  }
+}
+
+class _RemoteMultiRunSystemGroup {
+  _RemoteMultiRunSystemGroup({
+    required this.id,
+    required this.jobs,
+  });
+
+  final String id;
+  String? selectedDeviceDns;
+  final List<_RemoteMultiRunFileEntry> jobs;
+
+  void dispose() {
+    for (final job in jobs) {
+      job.dispose();
+    }
+  }
+}
+
+class _RemoteMultiRunJobRequest {
+  const _RemoteMultiRunJobRequest({
+    required this.systemGroup,
+    required this.fileEntry,
+    required this.dnsName,
+    required this.user,
+    required this.keyPath,
+    required this.localFilePath,
+    required this.remoteCommand,
+    required this.safeCommand,
+    required this.isWindowsTarget,
+    required this.windowsCleanupPattern,
+    required this.enableInteractiveInput,
+    required this.autoKillWindowsPythonAfterStreamRun,
+  });
+
+  final _RemoteMultiRunSystemGroup systemGroup;
+  final _RemoteMultiRunFileEntry fileEntry;
+  final String dnsName;
+  final String user;
+  final String keyPath;
+  final String localFilePath;
+  final String remoteCommand;
+  final String safeCommand;
+  final bool isWindowsTarget;
+  final String windowsCleanupPattern;
+  final bool enableInteractiveInput;
+  final bool autoKillWindowsPythonAfterStreamRun;
+}
+
+class _RemoteMultiRunJobOutcome {
+  const _RemoteMultiRunJobOutcome({
+    required this.systemId,
+    required this.fileEntryId,
+    required this.record,
+    required this.summary,
+    required this.stoppedByUser,
+  });
+
+  final String systemId;
+  final String fileEntryId;
+  final RemoteExecutionRecord record;
+  final String summary;
+  final bool stoppedByUser;
+}
+
 class ScaleServeApp extends StatefulWidget {
   const ScaleServeApp({
     super.key,
@@ -1125,6 +1221,12 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
               'Fast compatibility check for CUDA toolchain and GPU visibility.',
         ),
         _RemoteCommandPreset(
+          id: 'pytorch_cuda_check',
+          label: 'PyTorch CUDA check',
+          description:
+              'Verifies PyTorch, CUDA visibility, and visible GPU names.',
+        ),
+        _RemoteCommandPreset(
           id: 'ollama_health',
           label: 'Ollama health',
           description:
@@ -1137,14 +1239,46 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
               'Runs a quick local generation test (model may auto-download).',
         ),
         _RemoteCommandPreset(
-          id: 'openai_api_smoke',
-          label: 'LLM API smoke test',
+          id: 'ollama_chat_api',
+          label: 'Ollama chat API',
           description:
-              'Calls OpenAI models endpoint using OPENAI_API_KEY on target.',
+              'Calls Ollama through its local OpenAI-compatible chat endpoint.',
+        ),
+        _RemoteCommandPreset(
+          id: 'openai_api_smoke',
+          label: 'OpenAI models list',
+          description:
+              'Lists OpenAI models using OPENAI_API_KEY on target.',
+        ),
+        _RemoteCommandPreset(
+          id: 'openai_chat_api',
+          label: 'OpenAI chat test',
+          description:
+              'Sends a short chat request using OPENAI_API_KEY on target.',
+        ),
+        _RemoteCommandPreset(
+          id: 'openai_compat_local_chat',
+          label: 'Local OpenAI-compatible chat',
+          description:
+              'Calls a local/self-hosted OpenAI-style endpoint such as Ollama or vLLM.',
+        ),
+        _RemoteCommandPreset(
+          id: 'vllm_health',
+          label: 'vLLM health',
+          description:
+              'Checks for vLLM plus a local OpenAI-compatible server on :8000.',
         ),
       ];
   static const List<_StreamCommandPreset>
   _streamCommandPresetCatalog = <_StreamCommandPreset>[
+    _StreamCommandPreset(
+      id: 'custom_stdin',
+      label: 'Custom stdin command',
+      description:
+          'Use any command that reads from stdin: bash -s, python3 -, node -, pwsh -Command -, ruby -, and more.',
+      posixCommand: '',
+      windowsCommand: '',
+    ),
     _StreamCommandPreset(
       id: 'python_stdin',
       label: 'Python (stdin)',
@@ -1177,6 +1311,20 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       windowsCommand: 'node -',
     ),
     _StreamCommandPreset(
+      id: 'ruby_stdin',
+      label: 'Ruby (stdin)',
+      description: 'Streams local file directly into the Ruby interpreter.',
+      posixCommand: 'ruby -',
+      windowsCommand: 'ruby -',
+    ),
+    _StreamCommandPreset(
+      id: 'perl_stdin',
+      label: 'Perl (stdin)',
+      description: 'Streams local file directly into the Perl interpreter.',
+      posixCommand: 'perl -',
+      windowsCommand: 'perl -',
+    ),
+    _StreamCommandPreset(
       id: 'powershell_stdin',
       label: 'PowerShell (stdin)',
       description:
@@ -1196,16 +1344,13 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
       TextEditingController();
   final TextEditingController _bootstrapKeyPathController =
       TextEditingController();
-  final TextEditingController _localStreamFilePathController =
-      TextEditingController();
-  final TextEditingController _remoteStdinCommandController =
-      TextEditingController(text: 'python3 -');
-  final TextEditingController _windowsCleanupPatternController =
-      TextEditingController(text: 'scaleserve_stream');
-  final TextEditingController _runtimeInputController = TextEditingController();
   final TextEditingController _remoteCommandController =
       TextEditingController();
   final TextEditingController _deviceSearchController = TextEditingController();
+  int _multiRemoteRunSystemCounter = 0;
+  int _multiRemoteRunFileCounter = 0;
+  late final List<_RemoteMultiRunSystemGroup> _multiRemoteRunSystems =
+      <_RemoteMultiRunSystemGroup>[_createMultiRemoteRunSystemGroup()];
 
   TailscaleSnapshot? _snapshot;
   String _infoMessage = 'Checking Tailscale status...';
@@ -1218,20 +1363,17 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   bool _loadingStatus = true;
   bool _runningAction = false;
   bool _runningRemoteCommand = false;
+  bool _runningParallelRemoteRuns = false;
   bool _generatingSshKey = false;
   bool _detectingRemoteUser = false;
   bool _rememberAuthKey = false;
   bool _autoConnectOnLaunch = false;
   bool _setupEnableTailscaleSsh = true;
-  bool _autoKillWindowsPythonAfterStreamRun = true;
-  bool _enableInteractiveInputForPythonStreamRuns = false;
   bool _hasStoredKey = false;
   bool _remoteStopRequested = false;
-  bool _activeRunSupportsRuntimeInput = false;
   bool _showRemoteAdvancedOptions = false;
-  bool _showRemoteStreamOptions = false;
+  bool _showParallelRemoteRuns = false;
   String _selectedRemoteCommandPresetId = 'custom';
-  String _selectedStreamCommandPresetId = 'python_stdin';
   _DashboardSection _activeSection = _DashboardSection.overview;
   String _deviceSearchQuery = '';
 
@@ -1245,6 +1387,23 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
   Timer? _refreshTimer;
 
   bool get _isBusy => _loadingStatus || _runningAction;
+  bool get _remoteExecutionBusy =>
+      _runningRemoteCommand || _runningParallelRemoteRuns;
+  bool get _remoteRunnerBusy =>
+      _remoteExecutionBusy || _detectingRemoteUser || _generatingSshKey;
+
+  _RemoteMultiRunFileEntry _createMultiRemoteRunFileEntry() {
+    _multiRemoteRunFileCounter += 1;
+    return _RemoteMultiRunFileEntry(id: 'file_$_multiRemoteRunFileCounter');
+  }
+
+  _RemoteMultiRunSystemGroup _createMultiRemoteRunSystemGroup() {
+    _multiRemoteRunSystemCounter += 1;
+    return _RemoteMultiRunSystemGroup(
+      id: 'system_$_multiRemoteRunSystemCounter',
+      jobs: <_RemoteMultiRunFileEntry>[_createMultiRemoteRunFileEntry()],
+    );
+  }
 
   @override
   void initState() {
@@ -2076,6 +2235,11 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
               ' }"';
         }
         return "bash -lc '(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader) || echo \"nvidia-smi not found\"; (command -v nvcc >/dev/null 2>&1 && nvcc --version) || echo \"nvcc not found\"'";
+      case 'pytorch_cuda_check':
+        if (windows) {
+          return r"""powershell -NoProfile -NonInteractive -Command "$cmd = 'import torch; print(\"torch\", torch.__version__); print(\"cuda available:\", torch.cuda.is_available()); print(\"device count:\", torch.cuda.device_count()); [print(f\"gpu {i}: {torch.cuda.get_device_name(i)}\") for i in range(torch.cuda.device_count())]'; if (Get-Command py -ErrorAction SilentlyContinue) { py -c $cmd } elseif (Get-Command python -ErrorAction SilentlyContinue) { python -c $cmd } else { Write-Host 'Python not found'; exit 1 }" """;
+        }
+        return "bash -lc '(python3 -c \"import torch; print(\\\"torch\\\", torch.__version__); print(\\\"cuda available:\\\", torch.cuda.is_available()); print(\\\"device count:\\\", torch.cuda.device_count()); [print(f\\\"gpu {i}: {torch.cuda.get_device_name(i)}\\\") for i in range(torch.cuda.device_count())]\" 2>/dev/null || python -c \"import torch; print(\\\"torch\\\", torch.__version__); print(\\\"cuda available:\\\", torch.cuda.is_available()); print(\\\"device count:\\\", torch.cuda.device_count()); [print(f\\\"gpu {i}: {torch.cuda.get_device_name(i)}\\\") for i in range(torch.cuda.device_count())]\" 2>/dev/null) || echo \"PyTorch not installed or CUDA not available\"'";
       case 'ollama_health':
         if (windows) {
           return r'powershell -NoProfile -NonInteractive -Command "ollama --version; try { (Invoke-RestMethod -Uri http://127.0.0.1:11434/api/tags -Method Get | ConvertTo-Json -Depth 6) } catch { Write-Host $_.Exception.Message; exit 1 }"';
@@ -2083,11 +2247,31 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
         return "bash -lc 'ollama --version && curl -sS http://127.0.0.1:11434/api/tags || echo \"Ollama API unavailable on :11434\"'";
       case 'ollama_generate':
         return 'ollama run llama3.2:3b "Say hello from ScaleServe and include GPU status if available."';
+      case 'ollama_chat_api':
+        if (windows) {
+          return r"""powershell -NoProfile -NonInteractive -Command "$model = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'llama3.2:3b' }; $body = @{ model = $model; messages = @(@{ role = 'user'; content = 'Say hello from ScaleServe and mention whether GPU acceleration is visible.' }); stream = $false } | ConvertTo-Json -Depth 6; Invoke-RestMethod -Method Post -Uri http://127.0.0.1:11434/v1/chat/completions -ContentType 'application/json' -Body $body | ConvertTo-Json -Depth 6" """;
+        }
+        return "bash -lc 'model=\"\${OLLAMA_MODEL:-llama3.2:3b}\"; curl -sS http://127.0.0.1:11434/v1/chat/completions -H \"Content-Type: application/json\" -d \"{\\\"model\\\":\\\"\$model\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Say hello from ScaleServe and mention whether GPU acceleration is visible.\\\"}],\\\"stream\\\":false}\"'";
       case 'openai_api_smoke':
         if (windows) {
           return "powershell -NoProfile -NonInteractive -Command \"\$k=\$env:OPENAI_API_KEY; if (-not \$k) { Write-Host \\\"Set OPENAI_API_KEY first\\\"; exit 1 }; \$h=@{Authorization=(\\\"Bearer \\\" + \$k)}; Invoke-RestMethod -Method Get -Uri https://api.openai.com/v1/models -Headers \$h | ConvertTo-Json -Depth 4\"";
         }
         return "bash -lc 'if [ -z \"\$OPENAI_API_KEY\" ]; then echo \"Set OPENAI_API_KEY first\"; exit 1; fi; curl -sS https://api.openai.com/v1/models -H \"Authorization: Bearer \$OPENAI_API_KEY\" | head -c 1200'";
+      case 'openai_chat_api':
+        if (windows) {
+          return r"""powershell -NoProfile -NonInteractive -Command "$k = $env:OPENAI_API_KEY; if (-not $k) { Write-Host 'Set OPENAI_API_KEY first'; exit 1 }; $model = if ($env:OPENAI_MODEL) { $env:OPENAI_MODEL } else { 'gpt-4o-mini' }; $headers = @{ Authorization = ('Bearer ' + $k); 'Content-Type' = 'application/json' }; $body = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with a short hello from ScaleServe and mention the hostname if available.' }); max_tokens = 80 } | ConvertTo-Json -Depth 6; Invoke-RestMethod -Method Post -Uri https://api.openai.com/v1/chat/completions -Headers $headers -Body $body | ConvertTo-Json -Depth 6" """;
+        }
+        return "bash -lc 'model=\"\${OPENAI_MODEL:-gpt-4o-mini}\"; if [ -z \"\$OPENAI_API_KEY\" ]; then echo \"Set OPENAI_API_KEY first\"; exit 1; fi; curl -sS https://api.openai.com/v1/chat/completions -H \"Authorization: Bearer \$OPENAI_API_KEY\" -H \"Content-Type: application/json\" -d \"{\\\"model\\\":\\\"\$model\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Reply with a short hello from ScaleServe and mention the hostname if available.\\\"}],\\\"max_tokens\\\":80}\" | head -c 2000'";
+      case 'openai_compat_local_chat':
+        if (windows) {
+          return r"""powershell -NoProfile -NonInteractive -Command "$base = if ($env:OPENAI_BASE_URL) { $env:OPENAI_BASE_URL } else { 'http://127.0.0.1:11434/v1' }; $model = if ($env:OPENAI_COMPAT_MODEL) { $env:OPENAI_COMPAT_MODEL } else { 'llama3.2:3b' }; $key = if ($env:OPENAI_COMPAT_API_KEY) { $env:OPENAI_COMPAT_API_KEY } else { 'ollama' }; $headers = @{ Authorization = ('Bearer ' + $key); 'Content-Type' = 'application/json' }; $body = @{ model = $model; messages = @(@{ role = 'user'; content = 'Say hello from ScaleServe via an OpenAI-compatible endpoint.' }); stream = $false } | ConvertTo-Json -Depth 6; Invoke-RestMethod -Method Post -Uri ($base + '/chat/completions') -Headers $headers -Body $body | ConvertTo-Json -Depth 6" """;
+        }
+        return "bash -lc 'base=\"\${OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}\"; model=\"\${OPENAI_COMPAT_MODEL:-llama3.2:3b}\"; key=\"\${OPENAI_COMPAT_API_KEY:-ollama}\"; curl -sS \"\$base/chat/completions\" -H \"Authorization: Bearer \$key\" -H \"Content-Type: application/json\" -d \"{\\\"model\\\":\\\"\$model\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Say hello from ScaleServe via an OpenAI-compatible endpoint.\\\"}],\\\"stream\\\":false}\" | head -c 2000'";
+      case 'vllm_health':
+        if (windows) {
+          return r"""powershell -NoProfile -NonInteractive -Command "if (Get-Command py -ErrorAction SilentlyContinue) { py -m vllm.entrypoints.openai.api_server --help *> $null; if ($LASTEXITCODE -eq 0) { Write-Host 'vLLM Python package detected' } else { Write-Host 'vLLM Python package not detected' } } elseif (Get-Command python -ErrorAction SilentlyContinue) { python -m vllm.entrypoints.openai.api_server --help *> $null; if ($LASTEXITCODE -eq 0) { Write-Host 'vLLM Python package detected' } else { Write-Host 'vLLM Python package not detected' } } else { Write-Host 'Python not found' }; try { Invoke-RestMethod -Method Get -Uri http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 6 } catch { Write-Host 'OpenAI-compatible server not reachable on :8000' }" """;
+        }
+        return "bash -lc '(python3 -m vllm.entrypoints.openai.api_server --help >/dev/null 2>&1 && echo \"vLLM Python package detected\") || echo \"vLLM Python package not detected\"; curl -sS http://127.0.0.1:8000/v1/models || echo \"OpenAI-compatible server not reachable on :8000\"'";
       case 'custom':
       default:
         return '';
@@ -2100,6 +2284,903 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
   }) {
     final preset = _streamCommandPresetById(presetId);
     return _isWindowsPeer(peer) ? preset.windowsCommand : preset.posixCommand;
+  }
+
+  RemoteDeviceProfile? _remoteProfileForDns(String dnsName) {
+    final normalized = dnsName.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    return _remoteProfilesByDns[normalized] ??
+        (normalized.endsWith('.')
+            ? _remoteProfilesByDns[normalized.substring(0, normalized.length - 1)]
+            : _remoteProfilesByDns['$normalized.']);
+  }
+
+  String _multiRemoteRunSystemLabel(_RemoteMultiRunSystemGroup systemGroup) {
+    final index = _multiRemoteRunSystems.indexWhere(
+      (item) => identical(item, systemGroup),
+    );
+    if (index == -1) {
+      return 'System';
+    }
+    return 'System ${index + 1}';
+  }
+
+  String _multiRemoteRunFileLabel(
+    _RemoteMultiRunSystemGroup systemGroup,
+    _RemoteMultiRunFileEntry fileEntry,
+  ) {
+    final index = systemGroup.jobs.indexWhere((item) => identical(item, fileEntry));
+    if (index == -1) {
+      return 'File';
+    }
+    return 'File ${index + 1}';
+  }
+
+  String _effectiveMultiRemoteRunCommand(
+    _RemoteMultiRunSystemGroup systemGroup,
+    _RemoteMultiRunFileEntry fileEntry,
+  ) {
+    final overrideCommand = fileEntry.remoteCommandController.text.trim();
+    if (overrideCommand.isNotEmpty) {
+      return overrideCommand;
+    }
+    final peer = _peerByDnsName(systemGroup.selectedDeviceDns ?? '');
+    return _streamCommandForPreset(
+      presetId: fileEntry.selectedStreamPresetId,
+      peer: peer,
+    );
+  }
+
+  void _applyMultiRemoteRunStreamPreset({
+    required _RemoteMultiRunSystemGroup systemGroup,
+    required _RemoteMultiRunFileEntry fileEntry,
+    required bool showMessage,
+  }) {
+    final peer = _peerByDnsName(systemGroup.selectedDeviceDns ?? '');
+    final preset = _streamCommandPresetById(fileEntry.selectedStreamPresetId);
+    if (preset.id == 'custom_stdin') {
+      if (!showMessage) {
+        return;
+      }
+      setState(() {
+        _infoMessage =
+            'Custom stdin mode selected. Enter any command that reads stdin for ${_targetOsLabel(peer)}.';
+      });
+      return;
+    }
+    final command = _streamCommandForPreset(
+      presetId: preset.id,
+      peer: peer,
+    );
+    setState(() {
+      fileEntry.remoteCommandController.text = command;
+      if (!preset.supportsInteractiveInput) {
+        fileEntry.enableInteractiveInputForPythonStreamRuns = false;
+      }
+      if (showMessage) {
+        _infoMessage =
+            'Applied stream preset "${preset.label}" for ${_targetOsLabel(peer)}.';
+      }
+    });
+  }
+
+  String _buildSafeRemoteStreamCommand({
+    required String keyPath,
+    required String target,
+    required String displayCommand,
+    required String localFilePath,
+  }) {
+    final safeCommand = StringBuffer('ssh ');
+    if (keyPath.isNotEmpty) {
+      safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
+    }
+    safeCommand.write(
+      '-o BatchMode=yes -o NumberOfPasswordPrompts=0 '
+      '-o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new ',
+    );
+    safeCommand.write('$target "$displayCommand" < "$localFilePath"');
+    return safeCommand.toString();
+  }
+
+  void _addMultiRemoteRunSystem() {
+    if (_remoteRunnerBusy) {
+      return;
+    }
+    setState(() {
+      _showParallelRemoteRuns = true;
+      _multiRemoteRunSystems.add(_createMultiRemoteRunSystemGroup());
+      _infoMessage =
+          'Added another remote system block for multi-target execution.';
+    });
+  }
+
+  void _removeMultiRemoteRunSystem(_RemoteMultiRunSystemGroup systemGroup) {
+    if (_remoteRunnerBusy || _multiRemoteRunSystems.length <= 1) {
+      return;
+    }
+    final systemLabel = _multiRemoteRunSystemLabel(systemGroup);
+    setState(() {
+      _multiRemoteRunSystems.remove(systemGroup);
+      systemGroup.dispose();
+      _infoMessage = 'Removed $systemLabel.';
+    });
+  }
+
+  void _setMultiRemoteRunFileCount(
+    _RemoteMultiRunSystemGroup systemGroup,
+    int count,
+  ) {
+    if (_remoteRunnerBusy) {
+      return;
+    }
+    if (count < 1) {
+      return;
+    }
+
+    setState(() {
+      while (systemGroup.jobs.length < count) {
+        systemGroup.jobs.add(_createMultiRemoteRunFileEntry());
+      }
+      while (systemGroup.jobs.length > count) {
+        final removed = systemGroup.jobs.removeLast();
+        removed.activeProcess?.kill();
+        removed.dispose();
+      }
+      _showParallelRemoteRuns = true;
+    });
+  }
+
+  Future<_RemoteMultiRunJobRequest> _prepareRemoteMultiRunJobRequest({
+    required _RemoteMultiRunSystemGroup systemGroup,
+    required _RemoteMultiRunFileEntry fileEntry,
+  }) async {
+    final systemLabel = _multiRemoteRunSystemLabel(systemGroup);
+    final fileLabel = _multiRemoteRunFileLabel(systemGroup, fileEntry);
+    final dnsName = (systemGroup.selectedDeviceDns ?? '').trim();
+    if (dnsName.isEmpty) {
+      throw StateError('$systemLabel: select a target system.');
+    }
+
+    final peer = _peerByDnsName(dnsName);
+    final profile = _remoteProfileForDns(dnsName);
+    final fallbackUser = _defaultSshUserForPeer(peer);
+    final user = (profile?.user.trim().isNotEmpty ?? false)
+        ? profile!.user.trim()
+        : fallbackUser;
+    if (user.isEmpty || user == '<remote-user>') {
+      throw StateError(
+        '$systemLabel: save a device profile or enter a valid SSH user first.',
+      );
+    }
+
+    final keyPath = (profile?.keyPath.trim().isNotEmpty ?? false)
+        ? profile!.keyPath.trim()
+        : _remoteKeyPathController.text.trim();
+    final localFilePath = fileEntry.filePathController.text.trim();
+    final file = File(localFilePath);
+    if (!await file.exists()) {
+      throw StateError('$systemLabel / $fileLabel: local file not found.');
+    }
+
+    final remoteCommand = _effectiveMultiRemoteRunCommand(
+      systemGroup,
+      fileEntry,
+    );
+    if (remoteCommand.isEmpty) {
+      throw StateError(
+        '$systemLabel / $fileLabel: enter a command to run (for example: bash -s, python3 -, node -, pwsh -Command -, ruby -).',
+      );
+    }
+    if (fileEntry.enableInteractiveInputForPythonStreamRuns &&
+        !_isPythonStdinCommand(remoteCommand)) {
+      throw StateError(
+        '$systemLabel / $fileLabel: interactive input only works with commands like "py -" or "python -".',
+      );
+    }
+
+    final target = '$user@$dnsName';
+    final safeCommand = _buildSafeRemoteStreamCommand(
+      keyPath: keyPath,
+      target: target,
+      displayCommand: remoteCommand,
+      localFilePath: localFilePath,
+    );
+
+    return _RemoteMultiRunJobRequest(
+      systemGroup: systemGroup,
+      fileEntry: fileEntry,
+      dnsName: dnsName,
+      user: user,
+      keyPath: keyPath,
+      localFilePath: localFilePath,
+      remoteCommand: remoteCommand,
+      safeCommand: safeCommand,
+      isWindowsTarget: _isWindowsPeer(peer),
+      windowsCleanupPattern: fileEntry.windowsCleanupPatternController.text.trim(),
+      enableInteractiveInput:
+          fileEntry.enableInteractiveInputForPythonStreamRuns,
+      autoKillWindowsPythonAfterStreamRun:
+          fileEntry.autoKillWindowsPythonAfterStreamRun,
+    );
+  }
+
+  Future<void> _sendMultiRemoteRunInputLine(
+    _RemoteMultiRunFileEntry fileEntry,
+  ) async {
+    final process = fileEntry.activeProcess;
+    final input = fileEntry.runtimeInputController.text;
+    if (process == null || !fileEntry.isRunning || !fileEntry.activeRunSupportsRuntimeInput) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active interactive multi-system remote run.';
+      });
+      return;
+    }
+
+    try {
+      process.stdin.writeln(input);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'Could not send input to remote process: $error';
+      });
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      fileEntry.runtimeInputController.clear();
+      fileEntry.output += 'STDIN: $input\n';
+      _infoMessage = 'Sent input to multi-system remote process.';
+    });
+  }
+
+  Future<void> _sendMultiRemoteRunInputEof(
+    _RemoteMultiRunFileEntry fileEntry,
+  ) async {
+    final process = fileEntry.activeProcess;
+    if (process == null || !fileEntry.isRunning || !fileEntry.activeRunSupportsRuntimeInput) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active interactive multi-system remote run.';
+      });
+      return;
+    }
+
+    try {
+      await process.stdin.close();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'Could not send EOF to remote process: $error';
+      });
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      fileEntry.activeRunSupportsRuntimeInput = false;
+      fileEntry.statusText = 'Running';
+      _infoMessage = 'Sent EOF to multi-system remote process stdin.';
+    });
+  }
+
+  Future<void> _stopMultiRemoteRunJob(
+    _RemoteMultiRunFileEntry fileEntry,
+  ) async {
+    final process = fileEntry.activeProcess;
+    if (process == null) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active remote run to stop for this file.';
+      });
+      return;
+    }
+
+    fileEntry.stopRequested = true;
+    var killed = false;
+    try {
+      killed = process.kill(ProcessSignal.sigterm);
+    } catch (_) {
+      // Fall through to default kill below.
+    }
+    if (!killed) {
+      try {
+        killed = process.kill();
+      } catch (_) {
+        // Best effort only.
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      fileEntry.activeRunSupportsRuntimeInput = false;
+      fileEntry.output += '\n[Control] Stop requested by user.\n';
+      fileEntry.statusText = 'Stopping';
+      _infoMessage = killed
+          ? 'Stop requested. Waiting for the file run to exit...'
+          : 'Could not send stop signal to the file run.';
+    });
+  }
+
+  Future<_RemoteMultiRunJobOutcome> _executeRemoteMultiRunJob(
+    _RemoteMultiRunJobRequest request,
+  ) async {
+    final fileEntry = request.fileEntry;
+    final systemLabel = _multiRemoteRunSystemLabel(request.systemGroup);
+    final fileLabel = _multiRemoteRunFileLabel(request.systemGroup, fileEntry);
+    final startedAt = DateTime.now().toUtc();
+    final localFile = File(request.localFilePath);
+    final localFileLength = await localFile.length();
+    final interactivePythonStdinRun =
+        request.enableInteractiveInput &&
+        _isPythonStdinCommand(request.remoteCommand);
+
+    final effectiveRemoteCommand = interactivePythonStdinRun
+        ? _buildPythonInteractiveStreamCommand(
+                remoteStdinCommand: request.remoteCommand,
+                scriptByteLength: localFileLength,
+              ) ??
+              request.remoteCommand
+        : request.remoteCommand;
+
+    if (interactivePythonStdinRun &&
+        effectiveRemoteCommand == request.remoteCommand) {
+      throw StateError(
+        '$systemLabel / $fileLabel: interactive stdin mode requires a command like "py -" or "python -".',
+      );
+    }
+
+    final displayCommand = interactivePythonStdinRun
+        ? '${request.remoteCommand} [interactive wrapper]'
+        : effectiveRemoteCommand;
+    final safeCommand = _buildSafeRemoteStreamCommand(
+      keyPath: request.keyPath,
+      target: '${request.user}@${request.dnsName}',
+      displayCommand: displayCommand,
+      localFilePath: request.localFilePath,
+    );
+    final commandLabel =
+        'stream:${request.localFilePath} -> ${request.remoteCommand}';
+
+    if (mounted) {
+      setState(() {
+        fileEntry.isRunning = true;
+        fileEntry.stopRequested = false;
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.runtimeInputController.clear();
+        fileEntry.output =
+            'Command: $safeCommand\n\n'
+            'Starting $fileLabel on ${request.dnsName}...';
+        fileEntry.statusText = 'Running';
+      });
+    } else {
+      fileEntry.isRunning = true;
+      fileEntry.stopRequested = false;
+      fileEntry.activeRunSupportsRuntimeInput = false;
+      fileEntry.runtimeInputController.clear();
+      fileEntry.output =
+          'Command: $safeCommand\n\n'
+          'Starting $fileLabel on ${request.dnsName}...';
+      fileEntry.statusText = 'Running';
+    }
+
+    Process? process;
+    try {
+      final target = '${request.user}@${request.dnsName}';
+      final sshArgs = <String>[
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'NumberOfPasswordPrompts=0',
+        '-o',
+        'ConnectTimeout=8',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        if (request.keyPath.isNotEmpty) ...[
+          '-i',
+          request.keyPath,
+          '-o',
+          'IdentitiesOnly=yes',
+        ],
+        target,
+        effectiveRemoteCommand,
+      ];
+
+      process = await Process.start('ssh', sshArgs, runInShell: false);
+      final stdoutBuffer = StringBuffer();
+      final stderrBuffer = StringBuffer();
+      final stdoutDone = Completer<void>();
+      final stderrDone = Completer<void>();
+
+      if (mounted) {
+        setState(() {
+          fileEntry.activeProcess = process;
+          fileEntry.statusText = 'Streaming';
+        });
+      } else {
+        fileEntry.activeProcess = process;
+        fileEntry.statusText = 'Streaming';
+      }
+
+      process.stdout
+          .transform(utf8.decoder)
+          .listen(
+            (chunk) {
+              stdoutBuffer.write(chunk);
+              if (mounted) {
+                setState(() {
+                  fileEntry.output += 'STDOUT: $chunk';
+                });
+              } else {
+                fileEntry.output += 'STDOUT: $chunk';
+              }
+            },
+            onDone: () => stdoutDone.complete(),
+            onError: (_) => stdoutDone.complete(),
+            cancelOnError: false,
+          );
+
+      process.stderr
+          .transform(utf8.decoder)
+          .listen(
+            (chunk) {
+              stderrBuffer.write(chunk);
+              if (mounted) {
+                setState(() {
+                  fileEntry.output += 'STDERR: $chunk';
+                });
+              } else {
+                fileEntry.output += 'STDERR: $chunk';
+              }
+            },
+            onDone: () => stderrDone.complete(),
+            onError: (_) => stderrDone.complete(),
+            cancelOnError: false,
+          );
+
+      await process.stdin.addStream(localFile.openRead());
+      if (interactivePythonStdinRun) {
+        if (mounted) {
+          setState(() {
+            fileEntry.activeRunSupportsRuntimeInput = true;
+            fileEntry.statusText = 'Waiting for input';
+            _infoMessage =
+                '$systemLabel / $fileLabel is waiting for runtime input.';
+          });
+        } else {
+          fileEntry.activeRunSupportsRuntimeInput = true;
+          fileEntry.statusText = 'Waiting for input';
+        }
+      } else {
+        await process.stdin.close();
+      }
+
+      final exitCode = await process.exitCode;
+      await Future.wait([stdoutDone.future, stderrDone.future]);
+      if (interactivePythonStdinRun) {
+        try {
+          await process.stdin.close();
+        } catch (_) {
+          // Process may already be closed.
+        }
+      }
+
+      final stdoutText = stdoutBuffer.toString().trim();
+      final stderrText = stderrBuffer.toString().trim();
+      final stoppedByUser = fileEntry.stopRequested;
+      final finishedAt = DateTime.now().toUtc();
+
+      final shouldAutoCleanup =
+          request.isWindowsTarget && request.autoKillWindowsPythonAfterStreamRun;
+      final cleanupOutput = shouldAutoCleanup
+          ? (request.windowsCleanupPattern.isNotEmpty
+                ? await _cleanupWindowsPythonProcesses(
+                    dnsName: request.dnsName,
+                    user: request.user,
+                    keyPath: request.keyPath,
+                    commandLinePattern: request.windowsCleanupPattern,
+                  )
+                : 'Skipped auto-cleanup because cleanup pattern is empty.')
+          : '';
+
+      final summary = StringBuffer()
+        ..writeln('Command: $safeCommand')
+        ..writeln('Exit code: $exitCode')
+        ..writeln('');
+      if (stdoutText.isNotEmpty) {
+        summary
+          ..writeln('STDOUT:')
+          ..writeln(stdoutText)
+          ..writeln('');
+      }
+      if (stderrText.isNotEmpty) {
+        summary
+          ..writeln('STDERR:')
+          ..writeln(stderrText);
+      }
+      if (cleanupOutput.isNotEmpty) {
+        summary
+          ..writeln('')
+          ..writeln('AUTO-CLEANUP:')
+          ..writeln(cleanupOutput);
+      }
+
+      final record = RemoteExecutionRecord(
+        startedAtIso: startedAt.toIso8601String(),
+        finishedAtIso: finishedAt.toIso8601String(),
+        deviceDnsName: request.dnsName,
+        user: request.user,
+        command: commandLabel,
+        exitCode: exitCode,
+        success: exitCode == 0,
+        stdout: stdoutText,
+        stderr: stderrText,
+        runType: 'stream_file',
+        localFilePath: request.localFilePath,
+        metadataJson: jsonEncode(<String, dynamic>{
+          'safeCommand': safeCommand,
+          'parallelRun': true,
+          'systemId': request.systemGroup.id,
+          'fileEntryId': fileEntry.id,
+          'systemLabel': systemLabel,
+          'fileLabel': fileLabel,
+          'cleanupApplied': shouldAutoCleanup,
+          'cleanupPattern': request.windowsCleanupPattern,
+          'interactiveInput': interactivePythonStdinRun,
+          'stoppedByUser': stoppedByUser,
+        }),
+      );
+
+      if (mounted) {
+        setState(() {
+          fileEntry.output = summary.toString().trim();
+          fileEntry.activeRunSupportsRuntimeInput = false;
+          fileEntry.statusText = stoppedByUser
+              ? 'Stopped'
+              : (exitCode == 0 ? 'Completed' : 'Failed (exit $exitCode)');
+          fileEntry.isRunning = false;
+          fileEntry.activeProcess = null;
+        });
+      } else {
+        fileEntry.output = summary.toString().trim();
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.statusText = stoppedByUser
+            ? 'Stopped'
+            : (exitCode == 0 ? 'Completed' : 'Failed (exit $exitCode)');
+        fileEntry.isRunning = false;
+        fileEntry.activeProcess = null;
+      }
+
+      return _RemoteMultiRunJobOutcome(
+        systemId: request.systemGroup.id,
+        fileEntryId: fileEntry.id,
+        record: record,
+        summary: summary.toString().trim(),
+        stoppedByUser: stoppedByUser,
+      );
+    } on ProcessException catch (error) {
+      final finishedAt = DateTime.now().toUtc();
+      final summary =
+          'Command: $safeCommand\n'
+          'ERROR: ${error.message}';
+      final record = RemoteExecutionRecord(
+        startedAtIso: startedAt.toIso8601String(),
+        finishedAtIso: finishedAt.toIso8601String(),
+        deviceDnsName: request.dnsName,
+        user: request.user,
+        command: commandLabel,
+        exitCode: -1,
+        success: false,
+        stdout: '',
+        stderr: error.message,
+        runType: 'stream_file',
+        localFilePath: request.localFilePath,
+        metadataJson: jsonEncode(<String, dynamic>{
+          'safeCommand': safeCommand,
+          'parallelRun': true,
+          'systemId': request.systemGroup.id,
+          'fileEntryId': fileEntry.id,
+          'systemLabel': systemLabel,
+          'fileLabel': fileLabel,
+          'interactiveInput': interactivePythonStdinRun,
+          'stoppedByUser': fileEntry.stopRequested,
+        }),
+      );
+
+      if (mounted) {
+        setState(() {
+          fileEntry.output = summary;
+          fileEntry.activeRunSupportsRuntimeInput = false;
+          fileEntry.statusText = 'Failed to start';
+          fileEntry.isRunning = false;
+          fileEntry.activeProcess = null;
+        });
+      } else {
+        fileEntry.output = summary;
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.statusText = 'Failed to start';
+        fileEntry.isRunning = false;
+        fileEntry.activeProcess = null;
+      }
+
+      return _RemoteMultiRunJobOutcome(
+        systemId: request.systemGroup.id,
+        fileEntryId: fileEntry.id,
+        record: record,
+        summary: summary,
+        stoppedByUser: fileEntry.stopRequested,
+      );
+    } catch (error) {
+      final finishedAt = DateTime.now().toUtc();
+      final summary = 'Command: $safeCommand\nERROR: $error';
+      final record = RemoteExecutionRecord(
+        startedAtIso: startedAt.toIso8601String(),
+        finishedAtIso: finishedAt.toIso8601String(),
+        deviceDnsName: request.dnsName,
+        user: request.user,
+        command: commandLabel,
+        exitCode: -1,
+        success: false,
+        stdout: '',
+        stderr: error.toString(),
+        runType: 'stream_file',
+        localFilePath: request.localFilePath,
+        metadataJson: jsonEncode(<String, dynamic>{
+          'safeCommand': safeCommand,
+          'parallelRun': true,
+          'systemId': request.systemGroup.id,
+          'fileEntryId': fileEntry.id,
+          'systemLabel': systemLabel,
+          'fileLabel': fileLabel,
+          'interactiveInput': interactivePythonStdinRun,
+          'stoppedByUser': fileEntry.stopRequested,
+        }),
+      );
+
+      if (mounted) {
+        setState(() {
+          fileEntry.output = summary;
+          fileEntry.activeRunSupportsRuntimeInput = false;
+          fileEntry.statusText = 'Failed';
+          fileEntry.isRunning = false;
+          fileEntry.activeProcess = null;
+        });
+      } else {
+        fileEntry.output = summary;
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.statusText = 'Failed';
+        fileEntry.isRunning = false;
+        fileEntry.activeProcess = null;
+      }
+
+      return _RemoteMultiRunJobOutcome(
+        systemId: request.systemGroup.id,
+        fileEntryId: fileEntry.id,
+        record: record,
+        summary: summary,
+        stoppedByUser: fileEntry.stopRequested,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          if (identical(fileEntry.activeProcess, process)) {
+            fileEntry.activeProcess = null;
+          }
+          fileEntry.activeRunSupportsRuntimeInput = false;
+          fileEntry.isRunning = false;
+        });
+      } else {
+        if (identical(fileEntry.activeProcess, process)) {
+          fileEntry.activeProcess = null;
+        }
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.isRunning = false;
+      }
+    }
+  }
+
+  Future<void> _runMultiRemoteSystemJobs() async {
+    if (_remoteRunnerBusy) {
+      return;
+    }
+
+    final validationErrors = <String>[];
+    final requests = <_RemoteMultiRunJobRequest>[];
+
+    for (final systemGroup in _multiRemoteRunSystems) {
+      final systemLabel = _multiRemoteRunSystemLabel(systemGroup);
+      final dnsName = (systemGroup.selectedDeviceDns ?? '').trim();
+      if (dnsName.isEmpty) {
+        validationErrors.add('$systemLabel: select a target system.');
+        continue;
+      }
+
+      for (final fileEntry in systemGroup.jobs) {
+        final fileLabel = _multiRemoteRunFileLabel(systemGroup, fileEntry);
+        if (fileEntry.filePathController.text.trim().isEmpty) {
+          validationErrors.add(
+            '$systemLabel / $fileLabel: enter a local file path.',
+          );
+          continue;
+        }
+        try {
+          requests.add(
+            await _prepareRemoteMultiRunJobRequest(
+              systemGroup: systemGroup,
+              fileEntry: fileEntry,
+            ),
+          );
+        } catch (error) {
+          validationErrors.add(
+            error.toString().replaceFirst('Bad state: ', ''),
+          );
+        }
+      }
+    }
+
+    if (validationErrors.isNotEmpty) {
+      setState(() {
+        _showParallelRemoteRuns = true;
+        _infoMessage = validationErrors.join('\n');
+      });
+      return;
+    }
+
+    if (requests.isEmpty) {
+      setState(() {
+        _showParallelRemoteRuns = true;
+        _infoMessage = 'Add at least one remote file run before starting.';
+      });
+      return;
+    }
+
+    setState(() {
+      _showParallelRemoteRuns = true;
+      _runningParallelRemoteRuns = true;
+      for (final systemGroup in _multiRemoteRunSystems) {
+        for (final fileEntry in systemGroup.jobs) {
+          fileEntry.stopRequested = false;
+          fileEntry.activeProcess = null;
+          fileEntry.activeRunSupportsRuntimeInput = false;
+          final scheduled = requests.any(
+            (request) => identical(request.fileEntry, fileEntry),
+          );
+          fileEntry.isRunning = scheduled;
+          if (scheduled) {
+            fileEntry.output = '';
+            fileEntry.statusText = 'Queued';
+          } else if (fileEntry.output.isEmpty) {
+            fileEntry.statusText = 'Idle';
+          }
+        }
+      }
+      _infoMessage =
+          'Starting ${requests.length} remote run(s) across '
+          '${requests.map((request) => request.systemGroup.id).toSet().length} system(s)...';
+    });
+
+    try {
+      final outcomes = await Future.wait(
+        requests.map(_executeRemoteMultiRunJob),
+      );
+      final records = outcomes.map((outcome) => outcome.record).toList()
+        ..sort((a, b) => b.startedAtIso.compareTo(a.startedAtIso));
+
+      _remoteExecutionHistory = <RemoteExecutionRecord>[
+        ...records,
+        ..._remoteExecutionHistory,
+      ];
+      if (_remoteExecutionHistory.length > 30) {
+        _remoteExecutionHistory = _remoteExecutionHistory.take(30).toList();
+      }
+      await _saveRemoteComputeState();
+
+      final successCount = records.where((record) => record.success).length;
+      final stoppedCount = outcomes
+          .where((outcome) => outcome.stoppedByUser)
+          .length;
+
+      if (!mounted) {
+        _runningParallelRemoteRuns = false;
+        return;
+      }
+
+      setState(() {
+        _runningParallelRemoteRuns = false;
+        if (stoppedCount > 0) {
+          _infoMessage =
+              'Stop requested. $successCount/${records.length} remote run(s) completed successfully.';
+        } else if (successCount == records.length) {
+          _infoMessage =
+              'Completed ${records.length} remote run(s) across ${requests.map((request) => request.systemGroup.id).toSet().length} system(s).';
+        } else {
+          _infoMessage =
+              'Finished ${records.length} remote run(s) with ${records.length - successCount} failure(s).';
+        }
+      });
+    } catch (error) {
+      if (!mounted) {
+        _runningParallelRemoteRuns = false;
+        return;
+      }
+      setState(() {
+        _runningParallelRemoteRuns = false;
+        _infoMessage = 'Parallel remote execution failed: $error';
+      });
+    }
+  }
+
+  Future<void> _stopParallelRemoteRuns() async {
+    final activeJobs = <_RemoteMultiRunFileEntry>[];
+    for (final systemGroup in _multiRemoteRunSystems) {
+      for (final fileEntry in systemGroup.jobs) {
+        if (fileEntry.activeProcess != null) {
+          activeJobs.add(fileEntry);
+        }
+      }
+    }
+
+    if (activeJobs.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _infoMessage = 'No active parallel remote runs to stop.';
+      });
+      return;
+    }
+
+    var signaledAny = false;
+    for (final fileEntry in activeJobs) {
+      fileEntry.stopRequested = true;
+      var killed = false;
+      try {
+        killed = fileEntry.activeProcess?.kill(ProcessSignal.sigterm) ?? false;
+      } catch (_) {
+        // Fall through to default kill below.
+      }
+      if (!killed) {
+        try {
+          killed = fileEntry.activeProcess?.kill() ?? false;
+        } catch (_) {
+          // Best effort only.
+        }
+      }
+      signaledAny = signaledAny || killed;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      for (final fileEntry in activeJobs) {
+        fileEntry.activeRunSupportsRuntimeInput = false;
+        fileEntry.output += '\n[Control] Stop requested by user.\n';
+        fileEntry.statusText = 'Stopping';
+      }
+      _infoMessage = signaledAny
+          ? 'Stop requested for active parallel remote runs.'
+          : 'Could not send stop signal to the active parallel remote runs.';
+    });
   }
 
   void _applySelectedRemoteCommandPreset({required bool showMessage}) {
@@ -2140,22 +3221,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       _applySelectedRemoteCommandPreset(showMessage: false);
     }
     await _runRemoteCommand();
-  }
-
-  void _applySelectedStreamCommandPreset({required bool showMessage}) {
-    final peer = _peerByDnsName(_selectedRemoteDeviceDns ?? '');
-    final preset = _streamCommandPresetById(_selectedStreamCommandPresetId);
-    final command = _streamCommandForPreset(presetId: preset.id, peer: peer);
-    setState(() {
-      _remoteStdinCommandController.text = command;
-      if (!preset.supportsInteractiveInput) {
-        _enableInteractiveInputForPythonStreamRuns = false;
-      }
-      if (showMessage) {
-        _infoMessage =
-            'Applied stream preset "${preset.label}" for ${_targetOsLabel(peer)}.';
-      }
-    });
   }
 
   Future<void> _copyTargetSshBootstrapCommand() async {
@@ -2241,7 +3306,7 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       });
       return;
     }
-    if (_runningRemoteCommand || _detectingRemoteUser || _generatingSshKey) {
+    if (_remoteRunnerBusy) {
       return;
     }
 
@@ -2310,6 +3375,14 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     final dnsName = _selectedRemoteDeviceDns;
     final user = _remoteUserController.text.trim();
     final bootstrapKeyPath = _bootstrapKeyPathController.text.trim();
+
+    if (_remoteExecutionBusy) {
+      setState(() {
+        _infoMessage =
+            'Wait for the active remote run to finish before installing keys.';
+      });
+      return;
+    }
 
     if (_sshPublicKey.isEmpty) {
       await _loadSshKeyState();
@@ -2446,6 +3519,14 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     final user = _remoteUserController.text.trim();
     final keyPath = _remoteKeyPathController.text.trim();
 
+    if (_remoteExecutionBusy) {
+      setState(() {
+        _infoMessage =
+            'Wait for the active remote run to finish before testing SSH.';
+      });
+      return;
+    }
+
     if (dnsName == null || dnsName.isEmpty) {
       setState(() {
         _infoMessage = 'Select a remote device first.';
@@ -2523,14 +3604,16 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
   void dispose() {
     _refreshTimer?.cancel();
     _activeRemoteSshProcess?.kill();
+    for (final system in _multiRemoteRunSystems) {
+      for (final job in system.jobs) {
+        job.activeProcess?.kill();
+      }
+      system.dispose();
+    }
     _authKeyController.dispose();
     _remoteUserController.dispose();
     _remoteKeyPathController.dispose();
     _bootstrapKeyPathController.dispose();
-    _localStreamFilePathController.dispose();
-    _remoteStdinCommandController.dispose();
-    _windowsCleanupPatternController.dispose();
-    _runtimeInputController.dispose();
     _remoteCommandController.dispose();
     _deviceSearchController.dispose();
     super.dispose();
@@ -2747,6 +3830,14 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     final dnsName = _selectedRemoteDeviceDns;
     final keyPath = _remoteKeyPathController.text.trim();
 
+    if (_remoteExecutionBusy) {
+      setState(() {
+        _infoMessage =
+            'Wait for the active remote run to finish before detecting the SSH user.';
+      });
+      return;
+    }
+
     if (dnsName == null || dnsName.isEmpty) {
       setState(() {
         _infoMessage = 'Select a remote device first.';
@@ -2853,6 +3944,10 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
   }
 
   Future<void> _runRemoteCommand() async {
+    if (_remoteRunnerBusy) {
+      return;
+    }
+
     final dnsName = _selectedRemoteDeviceDns;
     final user = _remoteUserController.text.trim();
     final keyPath = _remoteKeyPathController.text.trim();
@@ -2910,8 +4005,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     setState(() {
       _runningRemoteCommand = true;
       _remoteStopRequested = false;
-      _activeRunSupportsRuntimeInput = false;
-      _runtimeInputController.clear();
       _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
       _infoMessage = 'Running remote command on $dnsName...';
     });
@@ -3013,7 +4106,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       }
       setState(() {
         _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput = summary.toString().trim();
         _infoMessage = stoppedByUser
             ? 'Remote command stopped by user.'
@@ -3027,7 +4119,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       }
       setState(() {
         _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: ${error.message}';
         _infoMessage = 'Could not start ssh command. ${error.message}';
       });
@@ -3037,7 +4128,6 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       }
       setState(() {
         _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
         _remoteLiveOutput += '\nERROR: $error';
         _infoMessage = 'Remote execution failed: $error';
       });
@@ -3046,366 +4136,7 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
         _activeRemoteSshProcess = null;
       }
       _remoteStopRequested = false;
-      _activeRunSupportsRuntimeInput = false;
     }
-  }
-
-  Future<void> _runLocalFileOnRemoteCompute() async {
-    final dnsName = _selectedRemoteDeviceDns;
-    final user = _remoteUserController.text.trim();
-    final keyPath = _remoteKeyPathController.text.trim();
-    final localFilePath = _localStreamFilePathController.text.trim();
-    if (dnsName == null || dnsName.isEmpty) {
-      setState(() {
-        _infoMessage = 'Select a remote device first.';
-      });
-      return;
-    }
-
-    final peer = _peerByDnsName(dnsName);
-    final remoteStdinCommand = _remoteStdinCommandController.text.trim().isEmpty
-        ? _streamCommandForPreset(
-            presetId: _selectedStreamCommandPresetId,
-            peer: peer,
-          )
-        : _remoteStdinCommandController.text.trim();
-    final windowsCleanupPattern = _windowsCleanupPatternController.text.trim();
-
-    if (user.isEmpty) {
-      setState(() {
-        _infoMessage = 'Remote user is required.';
-      });
-      return;
-    }
-
-    if (localFilePath.isEmpty) {
-      setState(() {
-        _infoMessage = 'Enter a local file path to stream.';
-      });
-      return;
-    }
-
-    final isWindowsTarget = (peer?.os ?? '').toLowerCase().contains('windows');
-
-    final localFile = File(localFilePath);
-    final exists = await localFile.exists();
-    if (!exists) {
-      setState(() {
-        _infoMessage = 'Local file not found: $localFilePath';
-      });
-      return;
-    }
-    final localFileLength = await localFile.length();
-
-    await _saveRemoteProfile(showMessage: false);
-
-    final interactivePythonStdinRun =
-        _enableInteractiveInputForPythonStreamRuns &&
-        _isPythonStdinCommand(remoteStdinCommand);
-
-    final effectiveRemoteStdinCommand = interactivePythonStdinRun
-        ? _buildPythonInteractiveStreamCommand(
-                remoteStdinCommand: remoteStdinCommand,
-                scriptByteLength: localFileLength,
-              ) ??
-              remoteStdinCommand
-        : remoteStdinCommand;
-
-    if (interactivePythonStdinRun &&
-        effectiveRemoteStdinCommand == remoteStdinCommand) {
-      setState(() {
-        _infoMessage =
-            'Interactive stdin mode requires a command like "py -" or "python -".';
-      });
-      return;
-    }
-
-    final target = '$user@$dnsName';
-    final sshArgs = <String>[
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'NumberOfPasswordPrompts=0',
-      '-o',
-      'ConnectTimeout=8',
-      '-o',
-      'StrictHostKeyChecking=accept-new',
-      if (keyPath.isNotEmpty) ...['-i', keyPath, '-o', 'IdentitiesOnly=yes'],
-      target,
-      effectiveRemoteStdinCommand,
-    ];
-
-    final safeCommand = StringBuffer('ssh ');
-    if (keyPath.isNotEmpty) {
-      safeCommand.write('-i $keyPath -o IdentitiesOnly=yes ');
-    }
-    safeCommand.write(
-      '-o BatchMode=yes -o NumberOfPasswordPrompts=0 '
-      '-o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new ',
-    );
-    final displayCommand = interactivePythonStdinRun
-        ? '$remoteStdinCommand [interactive wrapper]'
-        : effectiveRemoteStdinCommand;
-    safeCommand.write('$target "$displayCommand" < "$localFilePath"');
-    final startedAt = DateTime.now().toUtc();
-
-    setState(() {
-      _runningRemoteCommand = true;
-      _remoteStopRequested = false;
-      _activeRunSupportsRuntimeInput = false;
-      _runtimeInputController.clear();
-      _remoteLiveOutput = 'Command: ${safeCommand.toString()}\n';
-      _infoMessage = 'Streaming local file to $dnsName and running remotely...';
-    });
-
-    Process? process;
-    try {
-      process = await Process.start('ssh', sshArgs, runInShell: false);
-      _activeRemoteSshProcess = process;
-      final stdoutBuffer = StringBuffer();
-      final stderrBuffer = StringBuffer();
-
-      final stdoutDone = Completer<void>();
-      final stderrDone = Completer<void>();
-
-      process.stdout
-          .transform(utf8.decoder)
-          .listen(
-            (chunk) {
-              stdoutBuffer.write(chunk);
-              if (mounted) {
-                setState(() {
-                  _remoteLiveOutput += 'STDOUT: $chunk';
-                });
-              }
-            },
-            onDone: () => stdoutDone.complete(),
-            onError: (_) => stdoutDone.complete(),
-            cancelOnError: false,
-          );
-
-      process.stderr
-          .transform(utf8.decoder)
-          .listen(
-            (chunk) {
-              stderrBuffer.write(chunk);
-              if (mounted) {
-                setState(() {
-                  _remoteLiveOutput += 'STDERR: $chunk';
-                });
-              }
-            },
-            onDone: () => stderrDone.complete(),
-            onError: (_) => stderrDone.complete(),
-            cancelOnError: false,
-          );
-
-      await process.stdin.addStream(localFile.openRead());
-      if (interactivePythonStdinRun) {
-        if (mounted) {
-          setState(() {
-            _activeRunSupportsRuntimeInput = true;
-            _infoMessage =
-                'Script streamed. Waiting for runtime input. Send input lines below, then click Send EOF when prompts are done.';
-          });
-        } else {
-          _activeRunSupportsRuntimeInput = true;
-        }
-      } else {
-        await process.stdin.close();
-      }
-
-      final exitCode = await process.exitCode;
-      await Future.wait([stdoutDone.future, stderrDone.future]);
-      if (interactivePythonStdinRun) {
-        try {
-          await process.stdin.close();
-        } catch (_) {
-          // Process may already be closed.
-        }
-      }
-
-      final stdoutText = stdoutBuffer.toString().trim();
-      final stderrText = stderrBuffer.toString().trim();
-      final stoppedByUser = _remoteStopRequested;
-      final success = exitCode == 0;
-      final finishedAt = DateTime.now().toUtc();
-      final shouldAutoCleanup =
-          isWindowsTarget && _autoKillWindowsPythonAfterStreamRun;
-      final cleanupOutput = shouldAutoCleanup
-          ? (windowsCleanupPattern.isNotEmpty
-                ? await _cleanupWindowsPythonProcesses(
-                    dnsName: dnsName,
-                    user: user,
-                    keyPath: keyPath,
-                    commandLinePattern: windowsCleanupPattern,
-                  )
-                : 'Skipped auto-cleanup because cleanup pattern is empty.')
-          : '';
-
-      final summary = StringBuffer()
-        ..writeln('Command: ${safeCommand.toString()}')
-        ..writeln('Exit code: $exitCode')
-        ..writeln('');
-      if (stdoutText.isNotEmpty) {
-        summary
-          ..writeln('STDOUT:')
-          ..writeln(stdoutText)
-          ..writeln('');
-      }
-      if (stderrText.isNotEmpty) {
-        summary
-          ..writeln('STDERR:')
-          ..writeln(stderrText);
-      }
-      if (cleanupOutput.isNotEmpty) {
-        summary
-          ..writeln('')
-          ..writeln('AUTO-CLEANUP:')
-          ..writeln(cleanupOutput);
-      }
-
-      _remoteExecutionHistory.insert(
-        0,
-        RemoteExecutionRecord(
-          startedAtIso: startedAt.toIso8601String(),
-          finishedAtIso: finishedAt.toIso8601String(),
-          deviceDnsName: dnsName,
-          user: user,
-          command: 'stream:$localFilePath -> $remoteStdinCommand',
-          exitCode: exitCode,
-          success: success,
-          stdout: stdoutText,
-          stderr: stderrText,
-          runType: 'stream_file',
-          localFilePath: localFilePath,
-          metadataJson: jsonEncode(<String, dynamic>{
-            'safeCommand': safeCommand.toString(),
-            'cleanupApplied': shouldAutoCleanup,
-            'cleanupPattern': windowsCleanupPattern,
-            'interactiveInput': interactivePythonStdinRun,
-            'stoppedByUser': stoppedByUser,
-          }),
-        ),
-      );
-      if (_remoteExecutionHistory.length > 30) {
-        _remoteExecutionHistory = _remoteExecutionHistory.take(30).toList();
-      }
-
-      await _saveRemoteComputeState();
-
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
-        _remoteLiveOutput = summary.toString().trim();
-        _infoMessage = stoppedByUser
-            ? 'Remote stream run stopped by user.'
-            : (success
-                  ? 'Remote stream run completed on $dnsName.'
-                  : 'Remote stream run failed on $dnsName (exit $exitCode).');
-      });
-    } on ProcessException catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
-        _remoteLiveOutput += '\nERROR: ${error.message}';
-        _infoMessage = 'Could not start SSH stream command. ${error.message}';
-      });
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _runningRemoteCommand = false;
-        _activeRunSupportsRuntimeInput = false;
-        _remoteLiveOutput += '\nERROR: $error';
-        _infoMessage = 'Remote stream execution failed: $error';
-      });
-    } finally {
-      if (identical(_activeRemoteSshProcess, process)) {
-        _activeRemoteSshProcess = null;
-      }
-      _remoteStopRequested = false;
-      _activeRunSupportsRuntimeInput = false;
-    }
-  }
-
-  Future<void> _sendRuntimeInputLine() async {
-    final process = _activeRemoteSshProcess;
-    final input = _runtimeInputController.text;
-    if (process == null ||
-        !_runningRemoteCommand ||
-        !_activeRunSupportsRuntimeInput) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _infoMessage = 'No active interactive remote command.';
-      });
-      return;
-    }
-
-    try {
-      process.stdin.writeln(input);
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _infoMessage = 'Could not send input to remote process: $error';
-      });
-      return;
-    }
-
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _runtimeInputController.clear();
-      _remoteLiveOutput += 'STDIN: $input\n';
-      _infoMessage = 'Sent input to remote process.';
-    });
-  }
-
-  Future<void> _sendRuntimeInputEof() async {
-    final process = _activeRemoteSshProcess;
-    if (process == null ||
-        !_runningRemoteCommand ||
-        !_activeRunSupportsRuntimeInput) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _infoMessage = 'No active interactive remote command.';
-      });
-      return;
-    }
-
-    try {
-      await process.stdin.close();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _infoMessage = 'Could not send EOF to remote process: $error';
-      });
-      return;
-    }
-
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _activeRunSupportsRuntimeInput = false;
-      _infoMessage = 'Sent EOF to remote process stdin.';
-    });
   }
 
   bool _isPythonStdinCommand(String command) {
@@ -3514,7 +4245,6 @@ raise SystemExit(rc)
       return;
     }
     setState(() {
-      _activeRunSupportsRuntimeInput = false;
       _remoteLiveOutput += '\n[Control] Stop requested by user.\n';
       _infoMessage = killed
           ? 'Stop requested. Waiting for remote process to exit...'
@@ -3802,6 +4532,326 @@ raise SystemExit(rc)
     );
   }
 
+  String _multiRemoteRunProfileSummary(_RemoteMultiRunSystemGroup systemGroup) {
+    final dnsName = (systemGroup.selectedDeviceDns ?? '').trim();
+    if (dnsName.isEmpty) {
+      return 'Choose a system, then each file row below will use that system profile.';
+    }
+
+    final peer = _peerByDnsName(dnsName);
+    final profile = _remoteProfileForDns(dnsName);
+    if (profile != null) {
+      final hasCustomKey = profile.keyPath.trim().isNotEmpty;
+      return hasCustomKey
+          ? 'Using saved profile for ${profile.user} with a saved SSH key path.'
+          : 'Using saved profile for ${profile.user}. Shared/default SSH key path will be used.';
+    }
+
+    final fallbackUser = _defaultSshUserForPeer(peer);
+    if (fallbackUser == '<remote-user>') {
+      return 'No saved profile found for this system yet. Save a device profile first in the single-target runner above.';
+    }
+
+    return 'No saved profile found yet. This block will fall back to SSH user "$fallbackUser" and the shared key path field above.';
+  }
+
+  Widget _buildMultiRemoteRunFileCard({
+    required BuildContext context,
+    required _RemoteMultiRunSystemGroup systemGroup,
+    required _RemoteMultiRunFileEntry fileEntry,
+  }) {
+    final theme = Theme.of(context);
+    final selectedPreset = _streamCommandPresetById(
+      fileEntry.selectedStreamPresetId,
+    );
+    final fileLabel = _multiRemoteRunFileLabel(systemGroup, fileEntry);
+
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outline.withValues(alpha: 0.2),
+        ),
+        color: theme.colorScheme.surface.withValues(alpha: 0.55),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(fileLabel, style: theme.textTheme.titleSmall),
+              const SizedBox(width: 10),
+              _buildStatusChip(
+                context: context,
+                icon: fileEntry.isRunning
+                    ? Icons.sync
+                    : (fileEntry.statusText.startsWith('Completed')
+                          ? Icons.check_circle_outline
+                          : Icons.article_outlined),
+                label: fileEntry.statusText,
+              ),
+              const Spacer(),
+              if (fileEntry.activeProcess != null)
+                TextButton.icon(
+                  onPressed: () => _stopMultiRemoteRunJob(fileEntry),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('Stop'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: fileEntry.selectedStreamPresetId,
+            decoration: const InputDecoration(
+              labelText: 'Stream mode preset',
+            ),
+            items: _streamCommandPresetCatalog
+                .map(
+                  (preset) => DropdownMenuItem<String>(
+                    value: preset.id,
+                    child: Text(preset.label),
+                  ),
+                )
+                .toList(),
+            onChanged: _remoteRunnerBusy
+                ? null
+                : (value) {
+                    if (value == null) {
+                      return;
+                    }
+                    setState(() {
+                      fileEntry.selectedStreamPresetId = value;
+                    });
+                  },
+          ),
+          const SizedBox(height: 6),
+          Text(selectedPreset.description, style: theme.textTheme.bodySmall),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _remoteRunnerBusy
+                ? null
+                : () => _applyMultiRemoteRunStreamPreset(
+                    systemGroup: systemGroup,
+                    fileEntry: fileEntry,
+                    showMessage: true,
+                  ),
+            icon: const Icon(Icons.tune),
+            label: const Text('Apply Stream Preset'),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: fileEntry.filePathController,
+            enabled: !_remoteRunnerBusy,
+            decoration: InputDecoration(
+              labelText: 'Local file path to stream',
+              hintText: '/Users/you/path/script.sh / app.js / tool.py',
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: fileEntry.remoteCommandController,
+            enabled: !_remoteRunnerBusy,
+            minLines: 1,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Remote command (reads stdin)',
+              hintText:
+                  'bash -s / python3 - / node - / pwsh -Command - / ruby - / custom stdin reader',
+            ),
+          ),
+          const SizedBox(height: 8),
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: fileEntry.enableInteractiveInputForPythonStreamRuns,
+            onChanged: _remoteRunnerBusy
+                ? null
+                : (value) {
+                    setState(() {
+                      fileEntry.enableInteractiveInputForPythonStreamRuns =
+                          value ?? true;
+                    });
+                  },
+            title: const Text(
+              'Enable interactive input() for Python stream runs only',
+            ),
+            subtitle: const Text(
+              'Other runtimes still work here; this only keeps stdin open for Python prompt/response flows.',
+            ),
+          ),
+          const SizedBox(height: 8),
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: fileEntry.autoKillWindowsPythonAfterStreamRun,
+            onChanged: _remoteRunnerBusy
+                ? null
+                : (value) {
+                    setState(() {
+                      fileEntry.autoKillWindowsPythonAfterStreamRun =
+                          value ?? true;
+                    });
+                  },
+            title: const Text(
+              'Auto-clean matched python/py process after stream run on Windows',
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: fileEntry.windowsCleanupPatternController,
+            enabled: !_remoteRunnerBusy,
+            decoration: const InputDecoration(
+              labelText: 'Windows cleanup match (command line contains)',
+              hintText: 'scaleserve_stream',
+            ),
+          ),
+          if (fileEntry.isRunning && fileEntry.activeRunSupportsRuntimeInput) ...[
+            const SizedBox(height: 10),
+            TextField(
+              controller: fileEntry.runtimeInputController,
+              enabled: fileEntry.activeProcess != null,
+              onSubmitted: fileEntry.activeProcess == null
+                  ? null
+                  : (_) => _sendMultiRemoteRunInputLine(fileEntry),
+              decoration: InputDecoration(
+                labelText: '$fileLabel runtime input',
+                hintText: 'Type a reply for input() and press Send',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                FilledButton.icon(
+                  onPressed: fileEntry.activeProcess == null
+                      ? null
+                      : () => _sendMultiRemoteRunInputLine(fileEntry),
+                  icon: const Icon(Icons.send),
+                  label: const Text('Send Input'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: fileEntry.activeProcess == null
+                      ? null
+                      : () => _sendMultiRemoteRunInputEof(fileEntry),
+                  icon: const Icon(Icons.subdirectory_arrow_left),
+                  label: const Text('Send EOF'),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 10),
+          if (_runningParallelRemoteRuns && fileEntry.isRunning)
+            const LinearProgressIndicator(),
+          if (_runningParallelRemoteRuns && fileEntry.isRunning)
+            const SizedBox(height: 10),
+          _buildOutputPanel(
+            context: context,
+            text: fileEntry.output,
+            emptyText: 'No output yet for $fileLabel.',
+            maxHeight: 220,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMultiRemoteRunSystemCard({
+    required BuildContext context,
+    required _RemoteMultiRunSystemGroup systemGroup,
+    required List<TailscalePeer> remoteCandidates,
+  }) {
+    final theme = Theme.of(context);
+    final systemLabel = _multiRemoteRunSystemLabel(systemGroup);
+
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: theme.colorScheme.outline.withValues(alpha: 0.2),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(systemLabel, style: theme.textTheme.titleSmall),
+              ),
+              if (_multiRemoteRunSystems.length > 1)
+                TextButton.icon(
+                  onPressed: _remoteRunnerBusy
+                      ? null
+                      : () => _removeMultiRemoteRunSystem(systemGroup),
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Remove System'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: systemGroup.selectedDeviceDns,
+            decoration: const InputDecoration(labelText: 'Target system'),
+            items: remoteCandidates
+                .map(
+                  (peer) => DropdownMenuItem<String>(
+                    value: peer.normalizedDnsName,
+                    child: Text('${peer.name} (${peer.normalizedDnsName})'),
+                  ),
+                )
+                .toList(),
+            onChanged: _remoteRunnerBusy
+                ? null
+                : (value) {
+                    setState(() {
+                      systemGroup.selectedDeviceDns = value;
+                    });
+                  },
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<int>(
+            initialValue: systemGroup.jobs.length,
+            decoration: const InputDecoration(
+              labelText: 'How many files for this system?',
+            ),
+            items: List<DropdownMenuItem<int>>.generate(
+              6,
+              (index) => DropdownMenuItem<int>(
+                value: index + 1,
+                child: Text('${index + 1}'),
+              ),
+            ),
+            onChanged: _remoteRunnerBusy
+                ? null
+                : (value) {
+                    if (value == null) {
+                      return;
+                    }
+                    _setMultiRemoteRunFileCount(systemGroup, value);
+                  },
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _multiRemoteRunProfileSummary(systemGroup),
+            style: theme.textTheme.bodySmall,
+          ),
+          ...systemGroup.jobs.map(
+            (fileEntry) => _buildMultiRemoteRunFileCard(
+              context: context,
+              systemGroup: systemGroup,
+              fileEntry: fileEntry,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSectionSelector(BuildContext context) {
     return Wrap(
       spacing: 8,
@@ -3999,16 +5049,12 @@ raise SystemExit(rc)
     required String? selectedRemoteDns,
   }) {
     final theme = Theme.of(context);
-    final isBusy =
-        _runningRemoteCommand || _detectingRemoteUser || _generatingSshKey;
+    final isBusy = _remoteRunnerBusy;
     final selectedPeer = _peerByDnsName(selectedRemoteDns ?? '');
     final setupCommandLabel = _targetSshDoctorButtonLabel(selectedPeer);
     final setupTip = _targetSshDoctorTip(selectedPeer);
     final selectedCommandPreset = _remoteCommandPresetById(
       _selectedRemoteCommandPresetId,
-    );
-    final selectedStreamPreset = _streamCommandPresetById(
-      _selectedStreamCommandPresetId,
     );
 
     return Card(
@@ -4104,14 +5150,12 @@ raise SystemExit(rc)
                     ),
                   )
                   .toList(),
-              onChanged: _runningRemoteCommand || _detectingRemoteUser
-                  ? null
-                  : (value) => _selectRemoteDevice(value),
+              onChanged: isBusy ? null : (value) => _selectRemoteDevice(value),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: _remoteUserController,
-              enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+              enabled: !isBusy,
               decoration: const InputDecoration(
                 labelText: 'Remote SSH user',
                 hintText: 'ubuntu / opc / ec2-user',
@@ -4120,19 +5164,24 @@ raise SystemExit(rc)
             const SizedBox(height: 10),
             TextField(
               controller: _remoteCommandController,
-              enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+              enabled: !isBusy,
               minLines: 2,
               maxLines: 4,
               decoration: const InputDecoration(
                 labelText: 'Remote command',
-                hintText: 'cd /path/to/project && python3 script.py',
+                hintText:
+                    'nvidia-smi / ollama run llama3.2:3b / curl OpenAI or Ollama APIs / custom shell command',
+                helperText:
+                    'Type your manual command here. The preset selector below is not an editable text box.',
               ),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               initialValue: _selectedRemoteCommandPresetId,
               decoration: const InputDecoration(
-                labelText: 'Command preset (GPU + LLM ready)',
+                labelText: 'Command preset selector (shell + GPU + LLM)',
+                helperText:
+                    'Choose a preset to fill the command box above, or keep "Custom command" and type in the command box.',
               ),
               items: _remoteCommandPresetCatalog
                   .map(
@@ -4142,7 +5191,7 @@ raise SystemExit(rc)
                     ),
                   )
                   .toList(),
-              onChanged: _runningRemoteCommand || _detectingRemoteUser
+              onChanged: isBusy
                   ? null
                   : (value) {
                       if (value == null) {
@@ -4164,7 +5213,7 @@ raise SystemExit(rc)
               runSpacing: 10,
               children: [
                 OutlinedButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                  onPressed: isBusy
                       ? null
                       : () => _applySelectedRemoteCommandPreset(
                           showMessage: true,
@@ -4173,9 +5222,7 @@ raise SystemExit(rc)
                   label: const Text('Apply Preset'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : _runSelectedRemoteCommandPreset,
+                  onPressed: isBusy ? null : _runSelectedRemoteCommandPreset,
                   icon: const Icon(Icons.bolt),
                   label: const Text('Run Selected Preset'),
                 ),
@@ -4187,14 +5234,12 @@ raise SystemExit(rc)
               runSpacing: 10,
               children: [
                 FilledButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : _runRemoteCommand,
+                  onPressed: isBusy ? null : _runRemoteCommand,
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('Run On Selected Device'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
+                  onPressed: isBusy
                       ? null
                       : () => _saveRemoteProfile(showMessage: true),
                   icon: const Icon(Icons.save),
@@ -4210,8 +5255,7 @@ raise SystemExit(rc)
                 ),
                 TextButton(
                   onPressed:
-                      _runningRemoteCommand ||
-                          _detectingRemoteUser ||
+                      isBusy ||
                           _remoteExecutionHistory.isEmpty
                       ? null
                       : _clearRemoteHistory,
@@ -4236,7 +5280,7 @@ raise SystemExit(rc)
                 const SizedBox(height: 8),
                 TextField(
                   controller: _remoteKeyPathController,
-                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  enabled: !isBusy,
                   decoration: const InputDecoration(
                     labelText: 'SSH key path (optional)',
                     hintText: '~/.ssh/id_ed25519',
@@ -4245,7 +5289,7 @@ raise SystemExit(rc)
                 const SizedBox(height: 10),
                 TextField(
                   controller: _bootstrapKeyPathController,
-                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
+                  enabled: !isBusy,
                   decoration: const InputDecoration(
                     labelText: 'Bootstrap key path (first-time setup)',
                     hintText: '~/.ssh/oracle_server_key.pem',
@@ -4257,7 +5301,7 @@ raise SystemExit(rc)
                   runSpacing: 10,
                   children: [
                     OutlinedButton.icon(
-                      onPressed: _generatingSshKey ? null : _generateSshKeyPair,
+                      onPressed: isBusy ? null : _generateSshKeyPair,
                       icon: const Icon(Icons.key),
                       label: const Text('Regenerate / Ensure Key'),
                     ),
@@ -4267,9 +5311,7 @@ raise SystemExit(rc)
                       label: const Text('Copy Public Key'),
                     ),
                     OutlinedButton.icon(
-                      onPressed: _runningRemoteCommand || _detectingRemoteUser
-                          ? null
-                          : _detectRemoteSshUser,
+                      onPressed: isBusy ? null : _detectRemoteSshUser,
                       icon: const Icon(Icons.person_search),
                       label: Text(
                         _detectingRemoteUser
@@ -4278,9 +5320,7 @@ raise SystemExit(rc)
                       ),
                     ),
                     OutlinedButton.icon(
-                      onPressed: _runningRemoteCommand || _detectingRemoteUser
-                          ? null
-                          : _testSshAccess,
+                      onPressed: isBusy ? null : _testSshAccess,
                       icon: const Icon(Icons.verified_user),
                       label: const Text('Test SSH Access'),
                     ),
@@ -4291,170 +5331,56 @@ raise SystemExit(rc)
             const SizedBox(height: 6),
             ExpansionTile(
               tilePadding: EdgeInsets.zero,
-              title: const Text('Run Local File On Remote (Advanced)'),
+              title: const Text('Multi-System Remote File / Script Runs'),
               subtitle: const Text(
-                'Stream local file over SSH stdin without permanent upload.',
+                'Stream local files into stdin-based commands on one or many remote systems.',
               ),
-              initiallyExpanded: _showRemoteStreamOptions,
+              initiallyExpanded: _showParallelRemoteRuns,
               onExpansionChanged: (expanded) {
                 setState(() {
-                  _showRemoteStreamOptions = expanded;
+                  _showParallelRemoteRuns = expanded;
                 });
               },
               children: [
                 const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: _selectedStreamCommandPresetId,
-                  decoration: const InputDecoration(
-                    labelText: 'Stream mode preset',
-                  ),
-                  items: _streamCommandPresetCatalog
-                      .map(
-                        (preset) => DropdownMenuItem<String>(
-                          value: preset.id,
-                          child: Text(preset.label),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : (value) {
-                          if (value == null) {
-                            return;
-                          }
-                          setState(() {
-                            _selectedStreamCommandPresetId = value;
-                          });
-                          _applySelectedStreamCommandPreset(showMessage: false);
-                        },
-                ),
-                const SizedBox(height: 6),
                 Text(
-                  selectedStreamPreset.description,
+                  'Each system block picks one target. Inside that block, choose how many files to run, set each file path and command, and every file gets its own output pane. Use Python, bash, sh, Node, PowerShell, Ruby, Perl, or any custom stdin-reading command. Interactive runtime replies currently stay Python-only.',
                   style: theme.textTheme.bodySmall,
                 ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : () => _applySelectedStreamCommandPreset(
-                          showMessage: true,
-                        ),
-                  icon: const Icon(Icons.tune),
-                  label: const Text('Apply Stream Preset'),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: isBusy ? null : _runMultiRemoteSystemJobs,
+                      icon: const Icon(Icons.playlist_play),
+                      label: const Text('Run All Multi-System Jobs'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _runningParallelRemoteRuns
+                          ? _stopParallelRemoteRuns
+                          : null,
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      label: const Text('Stop Multi-System Jobs'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: isBusy ? null : _addMultiRemoteRunSystem,
+                      icon: const Icon(Icons.add_circle_outline),
+                      label: const Text('Add Another System'),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _localStreamFilePathController,
-                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
-                  decoration: const InputDecoration(
-                    labelText: 'Local file path to stream',
-                    hintText: '/Users/you/path/script.py',
+                ..._multiRemoteRunSystems.map(
+                  (systemGroup) => _buildMultiRemoteRunSystemCard(
+                    context: context,
+                    systemGroup: systemGroup,
+                    remoteCandidates: remoteCandidates,
                   ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _remoteStdinCommandController,
-                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
-                  decoration: const InputDecoration(
-                    labelText: 'Remote command (reads stdin)',
-                    hintText:
-                        'python3 - / bash -s / node - / powershell -Command -',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  value: _enableInteractiveInputForPythonStreamRuns,
-                  onChanged: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : (value) {
-                          setState(() {
-                            _enableInteractiveInputForPythonStreamRuns =
-                                value ?? true;
-                          });
-                        },
-                  title: const Text(
-                    'Enable interactive input() for Python stream runs only',
-                  ),
-                  subtitle: const Text(
-                    'Keeps stdin open so you can answer prompts while running (can wait until you send EOF).',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  value: _autoKillWindowsPythonAfterStreamRun,
-                  onChanged: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : (value) {
-                          setState(() {
-                            _autoKillWindowsPythonAfterStreamRun =
-                                value ?? true;
-                          });
-                        },
-                  title: const Text(
-                    'Auto-clean matched python/py process after stream run on Windows',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _windowsCleanupPatternController,
-                  enabled: !_runningRemoteCommand && !_detectingRemoteUser,
-                  decoration: const InputDecoration(
-                    labelText: 'Windows cleanup match (command line contains)',
-                    hintText: 'scaleserve_stream',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                FilledButton.icon(
-                  onPressed: _runningRemoteCommand || _detectingRemoteUser
-                      ? null
-                      : _runLocalFileOnRemoteCompute,
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('Stream Local File And Run'),
                 ),
               ],
             ),
-            if (_runningRemoteCommand && _activeRunSupportsRuntimeInput) ...[
-              const SizedBox(height: 10),
-              TextField(
-                controller: _runtimeInputController,
-                enabled: _activeRemoteSshProcess != null,
-                onSubmitted: _activeRemoteSshProcess == null
-                    ? null
-                    : (_) => _sendRuntimeInputLine(),
-                decoration: const InputDecoration(
-                  labelText: 'Runtime input',
-                  hintText: 'Type a reply for input() and press Send',
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  FilledButton.icon(
-                    onPressed: _activeRemoteSshProcess == null
-                        ? null
-                        : _sendRuntimeInputLine,
-                    icon: const Icon(Icons.send),
-                    label: const Text('Send Input'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: _activeRemoteSshProcess == null
-                        ? null
-                        : _sendRuntimeInputEof,
-                    icon: const Icon(Icons.subdirectory_arrow_left),
-                    label: const Text('Send EOF'),
-                  ),
-                ],
-              ),
-            ],
             const SizedBox(height: 10),
-            if (_runningRemoteCommand || _detectingRemoteUser)
+            if (isBusy)
               const LinearProgressIndicator(),
             const SizedBox(height: 8),
             _buildOutputPanel(
@@ -4916,7 +5842,7 @@ raise SystemExit(rc)
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ScaleServe Tailscale Controller'),
+        title: const Text('ScaleServe'),
         actions: [
           if (widget.signedInUser != null)
             Padding(

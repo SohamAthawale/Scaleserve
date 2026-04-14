@@ -5,10 +5,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'backend_auth_service.dart';
 import 'app_user.dart';
+import 'backend_auth_service.dart';
 import 'local_settings_store.dart';
 import 'remote_compute_store.dart';
+import 'scaleserve_branding.dart';
 import 'ssh_key_manager.dart';
 import 'tailscale_service.dart';
 
@@ -81,14 +82,13 @@ class _StreamCommandPreset {
 }
 
 class _RemoteMultiRunFileEntry {
-  _RemoteMultiRunFileEntry({
-    required this.id,
-  }) : filePathController = TextEditingController(),
-       remoteCommandController = TextEditingController(),
-       windowsCleanupPatternController = TextEditingController(
-         text: 'scaleserve_stream',
-       ),
-       runtimeInputController = TextEditingController();
+  _RemoteMultiRunFileEntry({required this.id})
+    : filePathController = TextEditingController(),
+      remoteCommandController = TextEditingController(),
+      windowsCleanupPatternController = TextEditingController(
+        text: 'scaleserve_stream',
+      ),
+      runtimeInputController = TextEditingController();
 
   final String id;
   final TextEditingController filePathController;
@@ -114,10 +114,7 @@ class _RemoteMultiRunFileEntry {
 }
 
 class _RemoteMultiRunSystemGroup {
-  _RemoteMultiRunSystemGroup({
-    required this.id,
-    required this.jobs,
-  });
+  _RemoteMultiRunSystemGroup({required this.id, required this.jobs});
 
   final String id;
   String? selectedDeviceDns;
@@ -208,26 +205,31 @@ class _ScaleServeAppState extends State<ScaleServeApp> {
 
   @override
   Widget build(BuildContext context) {
-    const seedColor = Color(0xFF005F73);
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: seedColor,
-      brightness: Brightness.light,
-    );
+    final colorScheme = scaleServeColorScheme();
 
     return MaterialApp(
-      title: 'ScaleServe Tailscale Controller',
+      title: 'ScaleServe',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: colorScheme,
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF6F8FB),
+        scaffoldBackgroundColor: ScaleServeBrandPalette.obsidian,
         visualDensity: VisualDensity.comfortable,
-        appBarTheme: const AppBarTheme(centerTitle: false),
+        appBarTheme: AppBarTheme(
+          centerTitle: false,
+          backgroundColor: ScaleServeBrandPalette.obsidian.withValues(
+            alpha: 0.82,
+          ),
+          foregroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+        ),
         cardTheme: CardThemeData(
           elevation: 0,
           color: Colors.white,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(20),
             side: BorderSide(
               color: colorScheme.outline.withValues(alpha: 0.18),
             ),
@@ -236,16 +238,33 @@ class _ScaleServeAppState extends State<ScaleServeApp> {
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          fillColor: Colors.white.withValues(alpha: 0.94),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide(
+              color: colorScheme.outline.withValues(alpha: 0.18),
+            ),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide(
+              color: colorScheme.outline.withValues(alpha: 0.18),
+            ),
+          ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: BorderSide(color: colorScheme.primary, width: 1.4),
+          ),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 16,
           ),
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            backgroundColor: colorScheme.primary,
+            foregroundColor: colorScheme.onPrimary,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -254,9 +273,24 @@ class _ScaleServeAppState extends State<ScaleServeApp> {
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            foregroundColor: colorScheme.primary,
+            side: BorderSide(color: colorScheme.outline.withValues(alpha: 0.3)),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          labelStyle: TextStyle(
+            color: colorScheme.onSurface,
+            fontWeight: FontWeight.w600,
+          ),
+          backgroundColor: Colors.white.withValues(alpha: 0.82),
+          selectedColor: colorScheme.primaryContainer,
+          side: BorderSide(color: colorScheme.outline.withValues(alpha: 0.2)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(999),
           ),
         ),
       ),
@@ -658,259 +692,408 @@ class _ScaleServeLoginPageState extends State<ScaleServeLoginPage> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildBrandStoryCard(BuildContext context) {
     final theme = Theme.of(context);
-
-    return Scaffold(
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 520),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('ScaleServe', style: theme.textTheme.headlineSmall),
-                      const SizedBox(height: 6),
-                      Text(
-                        _setupMode
-                            ? 'Create first operator account'
-                            : (_inMfaStep
-                                  ? 'Verify MFA OTP'
-                                  : 'Operator sign in'),
-                        style: theme.textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _inMfaStep
-                            ? 'A one-time code has been sent to your recovery Gmail.'
-                            : 'Authentication is validated through backend API and PostgreSQL.',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                      const SizedBox(height: 16),
-                      if (_loading) ...[
-                        const LinearProgressIndicator(),
-                        const SizedBox(height: 12),
-                      ],
-                      if (_inMfaStep) ...[
-                        TextField(
-                          controller: _mfaCodeController,
-                          enabled: !_loading && !_working,
-                          obscureText: _obscureMfaCode,
-                          textInputAction: TextInputAction.done,
-                          onSubmitted: (_) {
-                            if (!_loading && !_working) {
-                              _verifyMfaCode();
-                            }
-                          },
-                          decoration: InputDecoration(
-                            labelText: 'MFA OTP',
-                            hintText: '6-digit code',
-                            suffixIcon: IconButton(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        _obscureMfaCode = !_obscureMfaCode;
-                                      });
-                                    },
-                              icon: Icon(
-                                _obscureMfaCode
-                                    ? Icons.visibility
-                                    : Icons.visibility_off,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ] else ...[
-                        TextField(
-                          controller: _emailController,
-                          enabled: !_loading && !_working,
-                          textInputAction: TextInputAction.next,
-                          decoration: const InputDecoration(
-                            labelText: 'Gmail',
-                            hintText: 'you@gmail.com',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _passwordController,
-                          enabled: !_loading && !_working,
-                          obscureText: _obscurePassword,
-                          textInputAction: _setupMode
-                              ? TextInputAction.next
-                              : TextInputAction.done,
-                          onSubmitted: _setupMode
-                              ? null
-                              : (_) {
-                                  if (!_loading && !_working) {
-                                    _signIn();
-                                  }
-                                },
-                          decoration: InputDecoration(
-                            labelText: 'Password',
-                            hintText: 'Minimum 8 characters',
-                            suffixIcon: IconButton(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        _obscurePassword = !_obscurePassword;
-                                      });
-                                    },
-                              icon: Icon(
-                                _obscurePassword
-                                    ? Icons.visibility
-                                    : Icons.visibility_off,
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (_setupMode) ...[
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: _confirmPasswordController,
-                            enabled: !_loading && !_working,
-                            obscureText: _obscureConfirmPassword,
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (_) {
-                              if (!_loading && !_working) {
-                                _createFirstAccount();
-                              }
-                            },
-                            decoration: InputDecoration(
-                              labelText: 'Confirm password',
-                              suffixIcon: IconButton(
-                                onPressed: _loading || _working
-                                    ? null
-                                    : () {
-                                        setState(() {
-                                          _obscureConfirmPassword =
-                                              !_obscureConfirmPassword;
-                                        });
-                                      },
-                                icon: Icon(
-                                  _obscureConfirmPassword
-                                      ? Icons.visibility
-                                      : Icons.visibility_off,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          CheckboxListTile(
-                            contentPadding: EdgeInsets.zero,
-                            controlAffinity: ListTileControlAffinity.leading,
-                            value: _enableMfaForNewAccount,
-                            onChanged: _loading || _working
-                                ? null
-                                : (value) {
-                                    setState(() {
-                                      _enableMfaForNewAccount = value ?? false;
-                                    });
-                                  },
-                            title: const Text('Enable MFA at sign-in'),
-                            subtitle: const Text(
-                              'Requires OTP sender Gmail configured on the backend.',
-                            ),
-                          ),
-                        ] else ...[
-                          const SizedBox(height: 8),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: TextButton(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : _openForgotPasswordDialog,
-                              child: const Text('Forgot password?'),
-                            ),
-                          ),
-                        ],
-                      ],
-                      const SizedBox(height: 14),
-                      if (_inMfaStep)
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : _verifyMfaCode,
-                              icon: const Icon(Icons.verified_user),
-                              label: Text(
-                                _working ? 'Please wait...' : 'Verify OTP',
-                              ),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : _resendMfaCode,
-                              icon: const Icon(
-                                Icons.mark_email_unread_outlined,
-                              ),
-                              label: const Text('Resend OTP'),
-                            ),
-                            TextButton(
-                              onPressed: _loading || _working
-                                  ? null
-                                  : _cancelMfaStep,
-                              child: const Text('Cancel'),
-                            ),
-                          ],
-                        )
-                      else
-                        Row(
-                          children: [
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: _loading || _working
-                                    ? null
-                                    : (_setupMode
-                                          ? _createFirstAccount
-                                          : _signIn),
-                                icon: Icon(
-                                  _setupMode ? Icons.person_add : Icons.login,
-                                ),
-                                label: Text(
-                                  _working
-                                      ? 'Please wait...'
-                                      : (_setupMode
-                                            ? 'Create Account & Sign In'
-                                            : 'Sign In'),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            OutlinedButton.icon(
-                              onPressed: _working ? null : _loadMode,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Refresh'),
-                            ),
-                          ],
-                        ),
-                      const SizedBox(height: 12),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.surfaceContainerHighest
-                              .withValues(alpha: 0.55),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(_statusText),
-                      ),
-                    ],
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 360),
+        decoration: BoxDecoration(
+          gradient: ScaleServeBrandPalette.brandGradient,
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: Colors.white.withValues(alpha: 0.10),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                ),
+                child: Text(
+                  'SIGNAL-FIRST BRANDING',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.1,
                   ),
                 ),
               ),
+              const SizedBox(height: 20),
+              const ScaleServeBrandLockupImage(height: 72),
+              const SizedBox(height: 20),
+              const ScaleServeBrandVideoPanel(),
+              const SizedBox(height: 20),
+              Text(
+                'This panel now uses the exact branding photo and motion asset from your project, sized directly into the UI instead of recreating the logo in code.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.72),
+                  height: 1.6,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: const [
+                  ScaleServeFeatureBadge(
+                    icon: Icons.bolt_outlined,
+                    label: 'Exact photo lockup',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                  ScaleServeFeatureBadge(
+                    icon: Icons.play_circle_outline,
+                    label: 'Exact motion asset',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                  ScaleServeFeatureBadge(
+                    icon: Icons.aspect_ratio_outlined,
+                    label: 'Sized for UI',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  color: Colors.white.withValues(alpha: 0.08),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Brand direction',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Keep the system stark. Black does the heavy lifting, the green mark does the recognition work, and the white type keeps the product feeling immediate and confident.',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: Colors.white.withValues(alpha: 0.74),
+                        height: 1.55,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAuthCard(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const ScaleServeBrandLockupImage(height: 58),
+            const SizedBox(height: 12),
+            Text(
+              _setupMode
+                  ? 'Create the first operator account to initialize the workspace.'
+                  : (_inMfaStep
+                        ? 'Confirm the one-time code sent to your recovery Gmail.'
+                        : 'Sign in to the operator console.'),
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.5,
+              ),
             ),
+            const SizedBox(height: 16),
+            Text(
+              _setupMode
+                  ? 'Create first operator account'
+                  : (_inMfaStep ? 'Verify MFA OTP' : 'Operator sign in'),
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _inMfaStep
+                  ? 'A one-time code has been sent to your recovery Gmail.'
+                  : 'Authentication is validated through the backend API and PostgreSQL source of truth.',
+              style: theme.textTheme.bodySmall?.copyWith(height: 1.45),
+            ),
+            const SizedBox(height: 16),
+            if (_loading) ...[
+              const LinearProgressIndicator(),
+              const SizedBox(height: 12),
+            ],
+            if (_inMfaStep) ...[
+              TextField(
+                controller: _mfaCodeController,
+                enabled: !_loading && !_working,
+                obscureText: _obscureMfaCode,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  if (!_loading && !_working) {
+                    _verifyMfaCode();
+                  }
+                },
+                decoration: InputDecoration(
+                  labelText: 'MFA OTP',
+                  hintText: '6-digit code',
+                  suffixIcon: IconButton(
+                    onPressed: _loading || _working
+                        ? null
+                        : () {
+                            setState(() {
+                              _obscureMfaCode = !_obscureMfaCode;
+                            });
+                          },
+                    icon: Icon(
+                      _obscureMfaCode ? Icons.visibility : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+            ] else ...[
+              TextField(
+                controller: _emailController,
+                enabled: !_loading && !_working,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Gmail',
+                  hintText: 'you@gmail.com',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _passwordController,
+                enabled: !_loading && !_working,
+                obscureText: _obscurePassword,
+                textInputAction: _setupMode
+                    ? TextInputAction.next
+                    : TextInputAction.done,
+                onSubmitted: _setupMode
+                    ? null
+                    : (_) {
+                        if (!_loading && !_working) {
+                          _signIn();
+                        }
+                      },
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  hintText: 'Minimum 8 characters',
+                  suffixIcon: IconButton(
+                    onPressed: _loading || _working
+                        ? null
+                        : () {
+                            setState(() {
+                              _obscurePassword = !_obscurePassword;
+                            });
+                          },
+                    icon: Icon(
+                      _obscurePassword
+                          ? Icons.visibility
+                          : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+              if (_setupMode) ...[
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _confirmPasswordController,
+                  enabled: !_loading && !_working,
+                  obscureText: _obscureConfirmPassword,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) {
+                    if (!_loading && !_working) {
+                      _createFirstAccount();
+                    }
+                  },
+                  decoration: InputDecoration(
+                    labelText: 'Confirm password',
+                    suffixIcon: IconButton(
+                      onPressed: _loading || _working
+                          ? null
+                          : () {
+                              setState(() {
+                                _obscureConfirmPassword =
+                                    !_obscureConfirmPassword;
+                              });
+                            },
+                      icon: Icon(
+                        _obscureConfirmPassword
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: _enableMfaForNewAccount,
+                  onChanged: _loading || _working
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _enableMfaForNewAccount = value ?? false;
+                          });
+                        },
+                  title: const Text('Enable MFA at sign-in'),
+                  subtitle: const Text(
+                    'Requires OTP sender Gmail configured on the backend.',
+                  ),
+                ),
+              ] else ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: _loading || _working
+                        ? null
+                        : _openForgotPasswordDialog,
+                    child: const Text('Forgot password?'),
+                  ),
+                ),
+              ],
+            ],
+            const SizedBox(height: 14),
+            if (_inMfaStep)
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _loading || _working ? null : _verifyMfaCode,
+                    icon: const Icon(Icons.verified_user),
+                    label: Text(_working ? 'Please wait...' : 'Verify OTP'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _loading || _working ? null : _resendMfaCode,
+                    icon: const Icon(Icons.mark_email_unread_outlined),
+                    label: const Text('Resend OTP'),
+                  ),
+                  TextButton(
+                    onPressed: _loading || _working ? null : _cancelMfaStep,
+                    child: const Text('Cancel'),
+                  ),
+                ],
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: _loading || _working
+                          ? null
+                          : (_setupMode ? _createFirstAccount : _signIn),
+                      icon: Icon(_setupMode ? Icons.person_add : Icons.login),
+                      label: Text(
+                        _working
+                            ? 'Please wait...'
+                            : (_setupMode
+                                  ? 'Create Account & Sign In'
+                                  : 'Sign In'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: _working ? null : _loadMode,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh'),
+                  ),
+                ],
+              ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: theme.colorScheme.primaryContainer.withValues(
+                  alpha: 0.46,
+                ),
+                border: Border.all(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.16),
+                ),
+              ),
+              child: Text(
+                _statusText,
+                style: theme.textTheme.bodyMedium?.copyWith(height: 1.45),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: ScaleServeShellBackground(
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide = constraints.maxWidth >= 980;
+              final authCard = ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: _buildAuthCard(context),
+              );
+
+              return SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1180),
+                    child: isWide
+                        ? Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Expanded(child: _buildBrandStoryCard(context)),
+                              const SizedBox(width: 24),
+                              SizedBox(width: 480, child: authCard),
+                            ],
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _buildBrandStoryCard(context),
+                              const SizedBox(height: 20),
+                              Center(child: authCard),
+                            ],
+                          ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),
@@ -1194,81 +1377,77 @@ class _TailscaleDashboardPageState extends State<TailscaleDashboardPage> {
     'fedora',
     'root',
   ];
-  static const List<_RemoteCommandPreset> _remoteCommandPresetCatalog =
-      <_RemoteCommandPreset>[
-        _RemoteCommandPreset(
-          id: 'custom',
-          label: 'Custom command',
-          description:
-              'Type any command manually (shell, Python, Node, Docker, etc.).',
-        ),
-        _RemoteCommandPreset(
-          id: 'system_probe',
-          label: 'System probe',
-          description:
-              'Quick OS + runtime diagnostics (uname/version/python/node).',
-        ),
-        _RemoteCommandPreset(
-          id: 'gpu_inventory',
-          label: 'GPU inventory',
-          description:
-              'Checks NVIDIA/AMD GPU tooling and prints available GPU details.',
-        ),
-        _RemoteCommandPreset(
-          id: 'gpu_quick_check',
-          label: 'GPU quick check',
-          description:
-              'Fast compatibility check for CUDA toolchain and GPU visibility.',
-        ),
-        _RemoteCommandPreset(
-          id: 'pytorch_cuda_check',
-          label: 'PyTorch CUDA check',
-          description:
-              'Verifies PyTorch, CUDA visibility, and visible GPU names.',
-        ),
-        _RemoteCommandPreset(
-          id: 'ollama_health',
-          label: 'Ollama health',
-          description:
-              'Checks Ollama version and local Ollama API tags endpoint.',
-        ),
-        _RemoteCommandPreset(
-          id: 'ollama_generate',
-          label: 'Ollama test generate',
-          description:
-              'Runs a quick local generation test (model may auto-download).',
-        ),
-        _RemoteCommandPreset(
-          id: 'ollama_chat_api',
-          label: 'Ollama chat API',
-          description:
-              'Calls Ollama through its local OpenAI-compatible chat endpoint.',
-        ),
-        _RemoteCommandPreset(
-          id: 'openai_api_smoke',
-          label: 'OpenAI models list',
-          description:
-              'Lists OpenAI models using OPENAI_API_KEY on target.',
-        ),
-        _RemoteCommandPreset(
-          id: 'openai_chat_api',
-          label: 'OpenAI chat test',
-          description:
-              'Sends a short chat request using OPENAI_API_KEY on target.',
-        ),
-        _RemoteCommandPreset(
-          id: 'openai_compat_local_chat',
-          label: 'Local OpenAI-compatible chat',
-          description:
-              'Calls a local/self-hosted OpenAI-style endpoint such as Ollama or vLLM.',
-        ),
-        _RemoteCommandPreset(
-          id: 'vllm_health',
-          label: 'vLLM health',
-          description:
-              'Checks for vLLM plus a local OpenAI-compatible server on :8000.',
-        ),
-      ];
+  static const List<_RemoteCommandPreset>
+  _remoteCommandPresetCatalog = <_RemoteCommandPreset>[
+    _RemoteCommandPreset(
+      id: 'custom',
+      label: 'Custom command',
+      description:
+          'Type any command manually (shell, Python, Node, Docker, etc.).',
+    ),
+    _RemoteCommandPreset(
+      id: 'system_probe',
+      label: 'System probe',
+      description:
+          'Quick OS + runtime diagnostics (uname/version/python/node).',
+    ),
+    _RemoteCommandPreset(
+      id: 'gpu_inventory',
+      label: 'GPU inventory',
+      description:
+          'Checks NVIDIA/AMD GPU tooling and prints available GPU details.',
+    ),
+    _RemoteCommandPreset(
+      id: 'gpu_quick_check',
+      label: 'GPU quick check',
+      description:
+          'Fast compatibility check for CUDA toolchain and GPU visibility.',
+    ),
+    _RemoteCommandPreset(
+      id: 'pytorch_cuda_check',
+      label: 'PyTorch CUDA check',
+      description: 'Verifies PyTorch, CUDA visibility, and visible GPU names.',
+    ),
+    _RemoteCommandPreset(
+      id: 'ollama_health',
+      label: 'Ollama health',
+      description: 'Checks Ollama version and local Ollama API tags endpoint.',
+    ),
+    _RemoteCommandPreset(
+      id: 'ollama_generate',
+      label: 'Ollama test generate',
+      description:
+          'Runs a quick local generation test (model may auto-download).',
+    ),
+    _RemoteCommandPreset(
+      id: 'ollama_chat_api',
+      label: 'Ollama chat API',
+      description:
+          'Calls Ollama through its local OpenAI-compatible chat endpoint.',
+    ),
+    _RemoteCommandPreset(
+      id: 'openai_api_smoke',
+      label: 'OpenAI models list',
+      description: 'Lists OpenAI models using OPENAI_API_KEY on target.',
+    ),
+    _RemoteCommandPreset(
+      id: 'openai_chat_api',
+      label: 'OpenAI chat test',
+      description: 'Sends a short chat request using OPENAI_API_KEY on target.',
+    ),
+    _RemoteCommandPreset(
+      id: 'openai_compat_local_chat',
+      label: 'Local OpenAI-compatible chat',
+      description:
+          'Calls a local/self-hosted OpenAI-style endpoint such as Ollama or vLLM.',
+    ),
+    _RemoteCommandPreset(
+      id: 'vllm_health',
+      label: 'vLLM health',
+      description:
+          'Checks for vLLM plus a local OpenAI-compatible server on :8000.',
+    ),
+  ];
   static const List<_StreamCommandPreset>
   _streamCommandPresetCatalog = <_StreamCommandPreset>[
     _StreamCommandPreset(
@@ -2293,7 +2472,10 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     }
     return _remoteProfilesByDns[normalized] ??
         (normalized.endsWith('.')
-            ? _remoteProfilesByDns[normalized.substring(0, normalized.length - 1)]
+            ? _remoteProfilesByDns[normalized.substring(
+                0,
+                normalized.length - 1,
+              )]
             : _remoteProfilesByDns['$normalized.']);
   }
 
@@ -2311,7 +2493,9 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     _RemoteMultiRunSystemGroup systemGroup,
     _RemoteMultiRunFileEntry fileEntry,
   ) {
-    final index = systemGroup.jobs.indexWhere((item) => identical(item, fileEntry));
+    final index = systemGroup.jobs.indexWhere(
+      (item) => identical(item, fileEntry),
+    );
     if (index == -1) {
       return 'File';
     }
@@ -2350,10 +2534,7 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       });
       return;
     }
-    final command = _streamCommandForPreset(
-      presetId: preset.id,
-      peer: peer,
-    );
+    final command = _streamCommandForPreset(presetId: preset.id, peer: peer);
     setState(() {
       fileEntry.remoteCommandController.text = command;
       if (!preset.supportsInteractiveInput) {
@@ -2498,7 +2679,8 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       remoteCommand: remoteCommand,
       safeCommand: safeCommand,
       isWindowsTarget: _isWindowsPeer(peer),
-      windowsCleanupPattern: fileEntry.windowsCleanupPatternController.text.trim(),
+      windowsCleanupPattern: fileEntry.windowsCleanupPatternController.text
+          .trim(),
       enableInteractiveInput:
           fileEntry.enableInteractiveInputForPythonStreamRuns,
       autoKillWindowsPythonAfterStreamRun:
@@ -2511,7 +2693,9 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
   ) async {
     final process = fileEntry.activeProcess;
     final input = fileEntry.runtimeInputController.text;
-    if (process == null || !fileEntry.isRunning || !fileEntry.activeRunSupportsRuntimeInput) {
+    if (process == null ||
+        !fileEntry.isRunning ||
+        !fileEntry.activeRunSupportsRuntimeInput) {
       if (!mounted) {
         return;
       }
@@ -2547,7 +2731,9 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
     _RemoteMultiRunFileEntry fileEntry,
   ) async {
     final process = fileEntry.activeProcess;
-    if (process == null || !fileEntry.isRunning || !fileEntry.activeRunSupportsRuntimeInput) {
+    if (process == null ||
+        !fileEntry.isRunning ||
+        !fileEntry.activeRunSupportsRuntimeInput) {
       if (!mounted) {
         return;
       }
@@ -2790,7 +2976,8 @@ Write-Host 'Next: from your controller run: ssh -i <key_path> <user>@<tailscale_
       final finishedAt = DateTime.now().toUtc();
 
       final shouldAutoCleanup =
-          request.isWindowsTarget && request.autoKillWindowsPythonAfterStreamRun;
+          request.isWindowsTarget &&
+          request.autoKillWindowsPythonAfterStreamRun;
       final cleanupOutput = shouldAutoCleanup
           ? (request.windowsCleanupPattern.isNotEmpty
                 ? await _cleanupWindowsPythonProcesses(
@@ -4604,9 +4791,7 @@ raise SystemExit(rc)
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
             initialValue: fileEntry.selectedStreamPresetId,
-            decoration: const InputDecoration(
-              labelText: 'Stream mode preset',
-            ),
+            decoration: const InputDecoration(labelText: 'Stream mode preset'),
             items: _streamCommandPresetCatalog
                 .map(
                   (preset) => DropdownMenuItem<String>(
@@ -4707,7 +4892,8 @@ raise SystemExit(rc)
               hintText: 'scaleserve_stream',
             ),
           ),
-          if (fileEntry.isRunning && fileEntry.activeRunSupportsRuntimeInput) ...[
+          if (fileEntry.isRunning &&
+              fileEntry.activeRunSupportsRuntimeInput) ...[
             const SizedBox(height: 10),
             TextField(
               controller: fileEntry.runtimeInputController,
@@ -4852,7 +5038,165 @@ raise SystemExit(rc)
     );
   }
 
+  Widget _buildDashboardTitle(BuildContext context) {
+    return const ScaleServeBrandLockupImage(height: 38);
+  }
+
+  Widget _buildHeroStat({
+    required BuildContext context,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 148),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: Colors.white.withValues(alpha: 0.10),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: Colors.white.withValues(alpha: 0.68),
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBrandHeroCard({
+    required BuildContext context,
+    required List<TailscalePeer> remoteCandidates,
+    required bool connected,
+  }) {
+    final theme = Theme.of(context);
+    final successfulRuns = _remoteExecutionHistory
+        .where((record) => record.success)
+        .length;
+    final operatorLabel =
+        widget.signedInUser?.username ?? 'Local operator mode';
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: ScaleServeBrandPalette.brandGradient,
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: Colors.white.withValues(alpha: 0.10),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                ),
+                child: Text(
+                  connected ? 'LIVE OPERATOR SIGNAL' : 'SIGNAL STACK READY',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const ScaleServeBrandLockupImage(height: 70),
+              const SizedBox(height: 18),
+              Text(
+                'ScaleServe operator console using the exact uploaded brand lockup.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.76),
+                  height: 1.55,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  _buildHeroStat(
+                    context: context,
+                    label: 'TAILNET',
+                    value: connected ? 'Connected' : 'Awaiting link',
+                  ),
+                  _buildHeroStat(
+                    context: context,
+                    label: 'VISIBLE PEERS',
+                    value: '${remoteCandidates.length}',
+                  ),
+                  _buildHeroStat(
+                    context: context,
+                    label: 'SUCCESSFUL RUNS',
+                    value: '$successfulRuns',
+                  ),
+                  _buildHeroStat(
+                    context: context,
+                    label: 'OPERATOR',
+                    value: operatorLabel,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: const [
+                  ScaleServeFeatureBadge(
+                    icon: Icons.bolt_outlined,
+                    label: 'Exact brand lockup',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                  ScaleServeFeatureBadge(
+                    icon: Icons.terminal,
+                    label: 'Command-first workflows',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                  ScaleServeFeatureBadge(
+                    icon: Icons.shield_outlined,
+                    label: 'Trusted access layer',
+                    backgroundColor: Color(0x1AFFFFFF),
+                    foregroundColor: Colors.white,
+                    borderColor: Color(0x24FFFFFF),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSectionSelector(BuildContext context) {
+    final theme = Theme.of(context);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -4862,12 +5206,23 @@ raise SystemExit(rc)
             return ChoiceChip(
               selected: selected,
               showCheckmark: false,
+              selectedColor: theme.colorScheme.primaryContainer,
+              backgroundColor: Colors.white.withValues(alpha: 0.82),
+              side: BorderSide(
+                color: theme.colorScheme.outline.withValues(alpha: 0.18),
+              ),
               avatar: Icon(
                 section.icon,
                 size: 18,
-                color: selected ? Theme.of(context).colorScheme.primary : null,
+                color: selected ? theme.colorScheme.primary : null,
               ),
-              label: Text(section.label),
+              label: Text(
+                section.label,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: selected ? theme.colorScheme.primary : null,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
               onSelected: (_) {
                 setState(() {
                   _activeSection = section;
@@ -4894,16 +5249,26 @@ raise SystemExit(rc)
           borderRadius: BorderRadius.circular(18),
           gradient: LinearGradient(
             colors: [
-              theme.colorScheme.primary.withValues(alpha: 0.11),
-              theme.colorScheme.secondary.withValues(alpha: 0.08),
+              theme.colorScheme.primary.withValues(alpha: 0.12),
+              Colors.white,
+              theme.colorScheme.secondary.withValues(alpha: 0.07),
             ],
           ),
         ),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text(
+                'Control plane status',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                ),
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Icon(Icons.circle, size: 12, color: stateColor),
@@ -4913,7 +5278,9 @@ raise SystemExit(rc)
                       connected
                           ? 'Connected ($stateText)'
                           : 'Not connected ($stateText)',
-                      style: theme.textTheme.titleMedium,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                   if (_loadingStatus || _runningAction)
@@ -5254,9 +5621,7 @@ raise SystemExit(rc)
                   label: const Text('Stop Running Command'),
                 ),
                 TextButton(
-                  onPressed:
-                      isBusy ||
-                          _remoteExecutionHistory.isEmpty
+                  onPressed: isBusy || _remoteExecutionHistory.isEmpty
                       ? null
                       : _clearRemoteHistory,
                   child: const Text('Clear Run History'),
@@ -5380,8 +5745,7 @@ raise SystemExit(rc)
               ],
             ),
             const SizedBox(height: 10),
-            if (isBusy)
-              const LinearProgressIndicator(),
+            if (isBusy) const LinearProgressIndicator(),
             const SizedBox(height: 8),
             _buildOutputPanel(
               context: context,
@@ -5842,7 +6206,9 @@ raise SystemExit(rc)
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ScaleServe'),
+        toolbarHeight: 78,
+        titleSpacing: 18,
+        title: _buildDashboardTitle(context),
         actions: [
           if (widget.signedInUser != null)
             Padding(
@@ -5850,13 +6216,14 @@ raise SystemExit(rc)
               child: Center(
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
+                    horizontal: 12,
+                    vertical: 8,
                   ),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(999),
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest
-                        .withValues(alpha: 0.7),
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.primaryContainer.withValues(alpha: 0.72),
                   ),
                   child: Text('User: ${widget.signedInUser!.username}'),
                 ),
@@ -5873,40 +6240,53 @@ raise SystemExit(rc)
             ),
         ],
       ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 1080),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildStatusCard(
-                  context: context,
-                  snapshot: snapshot,
-                  connected: connected,
-                  stateText: stateText,
-                  stateColor: stateColor,
-                  lastUpdatedText: lastUpdatedText,
-                ),
-                const SizedBox(height: 16),
-                _buildSectionSelector(context),
-                const SizedBox(height: 12),
-                Text(
-                  _activeSection.label,
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _sectionDescription(_activeSection),
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 16),
-                for (var i = 0; i < sectionCards.length; i++) ...[
-                  sectionCards[i],
-                  if (i != sectionCards.length - 1) const SizedBox(height: 16),
+      body: ScaleServeShellBackground(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1080),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildBrandHeroCard(
+                    context: context,
+                    remoteCandidates: remoteCandidates,
+                    connected: connected,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildStatusCard(
+                    context: context,
+                    snapshot: snapshot,
+                    connected: connected,
+                    stateText: stateText,
+                    stateColor: stateColor,
+                    lastUpdatedText: lastUpdatedText,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildSectionSelector(context),
+                  const SizedBox(height: 14),
+                  Text(
+                    _activeSection.label,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _sectionDescription(_activeSection),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  for (var i = 0; i < sectionCards.length; i++) ...[
+                    sectionCards[i],
+                    if (i != sectionCards.length - 1)
+                      const SizedBox(height: 16),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "scaleserve_flutter" "\0"
+            VALUE "CompanyName", "ScaleServe" "\0"
+            VALUE "FileDescription", "ScaleServe Remote Operations Console" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "scaleserve_flutter" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "scaleserve_flutter.exe" "\0"
-            VALUE "ProductName", "scaleserve_flutter" "\0"
+            VALUE "InternalName", "ScaleServe" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 ScaleServe. All rights reserved." "\0"
+            VALUE "OriginalFilename", "ScaleServe.exe" "\0"
+            VALUE "ProductName", "ScaleServe" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

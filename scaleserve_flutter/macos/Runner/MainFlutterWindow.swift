@@ -9,6 +9,13 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    let brandVideoRegistrar = flutterViewController.registrar(
+      forPlugin: "ScaleServeBrandVideoViewFactory"
+    )
+    brandVideoRegistrar.register(
+      ScaleServeBrandVideoViewFactory(registrar: brandVideoRegistrar),
+      withId: "scaleserve.brand_video"
+    )
 
     super.awakeFromNib()
   }
